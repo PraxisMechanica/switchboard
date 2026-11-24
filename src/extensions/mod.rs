@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod codex;
 pub mod codex_policy;
+pub mod codex_queue;
 pub mod conformance;
 pub mod model;
 pub mod repo;

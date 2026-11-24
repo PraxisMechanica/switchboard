@@ -14,15 +14,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::codex_policy::{
     build_effective_codex_args, default_codex_args, denial_response_for_server_request,
-    extract_completed_agent_message, extract_delta_text, extract_thread_id, extract_thread_list,
-    format_prompt, rpc_error_message, thread_resume_params, turn_start_params,
+    extract_completed_agent_message, extract_delta_text, extract_thread_id, format_prompt,
+    rpc_error_message, thread_resume_params, turn_start_params,
 };
+use super::codex_queue::{deliver_to_active_session, is_active_writer_error, list_codex_sessions};
 use super::model::{resolve_codex_binary, CodexSessionInfo, DeliveryOutcome, DeliveryRequest};
 use super::{AgentHarness, ExtensionError};
 
-const CLIENT_NAME: &str = "switchboard";
-const CLIENT_TITLE: &str = "Switchboard";
-const CLIENT_VERSION: &str = "0.1.0";
+pub(crate) const CLIENT_NAME: &str = "switchboard";
+pub(crate) const CLIENT_TITLE: &str = "Switchboard";
+pub(crate) const CLIENT_VERSION: &str = "0.1.0";
 const MAX_STDERR_BYTES: usize = 4096;
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_millis(150);
 
@@ -67,63 +68,7 @@ impl CodexHarness {
         &self,
         limit: usize,
     ) -> Result<Vec<CodexSessionInfo>, ExtensionError> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mut session = CodexSession::spawn(&self.config, &cwd)?;
-        let cancel = CancellationToken::new();
-        let deadline = tokio::time::sleep(Duration::from_secs(15));
-        tokio::pin!(deadline);
-
-        let init_req = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": CLIENT_NAME,
-                    "title": CLIENT_TITLE,
-                    "version": CLIENT_VERSION
-                }
-            }
-        });
-        if let RpcStep::Outcome(outcome) = session
-            .rpc_call(1, &init_req, deadline.as_mut(), &cancel, "initialize")
-            .await?
-        {
-            return Err(ExtensionError::Protocol(format!(
-                "codex initialize failed while listing sessions: {outcome:?}"
-            )));
-        }
-
-        let initialized_note = json!({
-            "jsonrpc": "2.0",
-            "method": "initialized",
-            "params": {}
-        });
-        if session.send_json(&initialized_note).await.is_err() {
-            return Err(ExtensionError::Protocol(
-                "codex exited before thread/list".into(),
-            ));
-        }
-
-        let list_req = json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "thread/list",
-            "params": { "limit": limit }
-        });
-        let resp = match session
-            .rpc_call(2, &list_req, deadline.as_mut(), &cancel, "thread/list")
-            .await?
-        {
-            RpcStep::Response(msg) => msg,
-            RpcStep::Outcome(outcome) => {
-                return Err(ExtensionError::Protocol(format!(
-                    "codex thread/list interrupted: {outcome:?}"
-                )));
-            }
-        };
-        session.shutdown().await;
-        Ok(extract_thread_list(&resp))
+        list_codex_sessions(&self.config, limit).await
     }
 }
 
@@ -184,6 +129,8 @@ impl AgentHarness for CodexHarness {
         }
 
         // 3. Resume pre-existing thread (id: 2) — Switchboard never calls thread/start.
+        //    If Codex Desktop currently holds the writer lock, queue the message onto the live
+        //    session via `codex queue` and wait for its reply via `thread/read`.
         let thread_req = json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -191,10 +138,28 @@ impl AgentHarness for CodexHarness {
             "params": thread_resume_params(&req.session_id)
         });
         let thread_resp = match session
-            .rpc_call(2, &thread_req, deadline.as_mut(), &cancel, "thread/resume")
+            .rpc_call_raw(2, &thread_req, deadline.as_mut(), &cancel)
             .await?
         {
-            RpcStep::Response(msg) => msg,
+            RpcStep::Response(msg) => {
+                if let Some(err_msg) = rpc_error_message(&msg) {
+                    if is_active_writer_error(&err_msg) {
+                        return deliver_to_active_session(
+                            &self.config,
+                            &mut session,
+                            &req,
+                            deadline,
+                            &cancel,
+                        )
+                        .await;
+                    }
+                    session.shutdown().await;
+                    return Err(ExtensionError::Protocol(format!(
+                        "thread/resume failed: {err_msg}"
+                    )));
+                }
+                msg
+            }
             RpcStep::Outcome(outcome) => return Ok(outcome),
         };
 
@@ -222,12 +187,12 @@ impl AgentHarness for CodexHarness {
     }
 }
 
-enum RpcStep {
+pub(crate) enum RpcStep {
     Response(Value),
     Outcome(DeliveryOutcome),
 }
 
-struct CodexSession {
+pub(crate) struct CodexSession {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Lines<BufReader<ChildStdout>>,
@@ -235,7 +200,10 @@ struct CodexSession {
 }
 
 impl CodexSession {
-    fn spawn(config: &CodexConfig, workspace_dir: &Path) -> Result<Self, ExtensionError> {
+    pub(crate) fn spawn(
+        config: &CodexConfig,
+        workspace_dir: &Path,
+    ) -> Result<Self, ExtensionError> {
         let binary = resolve_codex_binary(&config.binary);
         let args = build_effective_codex_args(&config.args, config.codex_home.as_deref());
         let mut cmd = Command::new(&binary);
@@ -273,7 +241,7 @@ impl CodexSession {
         })
     }
 
-    async fn send_json(&mut self, payload: &Value) -> Result<(), ()> {
+    pub(crate) async fn send_json(&mut self, payload: &Value) -> Result<(), ()> {
         let Some(writer) = self.stdin.as_mut() else {
             return Err(());
         };
@@ -316,13 +284,12 @@ impl CodexSession {
         }
     }
 
-    async fn rpc_call(
+    pub(crate) async fn rpc_call_raw(
         &mut self,
         expected_id: u64,
         payload: &Value,
         mut deadline: Pin<&mut Sleep>,
         cancel: &CancellationToken,
-        context: &str,
     ) -> Result<RpcStep, ExtensionError> {
         if self.send_json(payload).await.is_err() {
             return Ok(RpcStep::Outcome(self.collect_process_failure().await));
@@ -338,14 +305,33 @@ impl CodexSession {
             };
 
             if msg.get("id").and_then(Value::as_u64) == Some(expected_id) {
+                return Ok(RpcStep::Response(msg));
+            }
+        }
+    }
+
+    pub(crate) async fn rpc_call(
+        &mut self,
+        expected_id: u64,
+        payload: &Value,
+        deadline: Pin<&mut Sleep>,
+        cancel: &CancellationToken,
+        context: &str,
+    ) -> Result<RpcStep, ExtensionError> {
+        match self
+            .rpc_call_raw(expected_id, payload, deadline, cancel)
+            .await?
+        {
+            RpcStep::Response(msg) => {
                 if let Some(err_msg) = rpc_error_message(&msg) {
                     self.shutdown().await;
                     return Err(ExtensionError::Protocol(format!(
                         "{context} failed: {err_msg}"
                     )));
                 }
-                return Ok(RpcStep::Response(msg));
+                Ok(RpcStep::Response(msg))
             }
+            outcome @ RpcStep::Outcome(_) => Ok(outcome),
         }
     }
 
@@ -426,7 +412,7 @@ impl CodexSession {
         self.shutdown().await;
     }
 
-    async fn shutdown(&mut self) {
+    pub(crate) async fn shutdown(&mut self) {
         let _ = self.stdin.take();
         if tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, self.child.wait())
             .await
