@@ -1,0 +1,23 @@
+{
+  "payload": {
+    "handle": "alice",
+    "peer_id": "1dcbe6f7c24d5f414b45a10c486ca5c570902076f5d0ffb7d16f4e6b23c38d9c",
+    "direct_addrs": [
+      "10.0.0.1:4433",
+      "10.0.0.2:4433"
+    ],
+    "extensions": [
+      {
+        "name": "alpha",
+        "description": "Alpha skill"
+      },
+      {
+        "name": "zeta",
+        "description": "Zeta skill"
+      }
+    ],
+    "updated_at": 1700000000000
+  },
+  "signer": "1dcbe6f7c24d5f414b45a10c486ca5c570902076f5d0ffb7d16f4e6b23c38d9c",
+  "signature": "4cfb942231f73caae3e6166ef59fc6c20de1fe596e3316dbf79bfd8287a0020c629bfa6a06d097bda3e76501f402bd038b29690f03d4cc4af94692489de99c08"
+}
