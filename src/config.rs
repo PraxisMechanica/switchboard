@@ -242,7 +242,7 @@ fn default_codex_binary() -> PathBuf {
 }
 
 fn default_codex_args() -> Vec<String> {
-    vec!["app-server".to_string()]
+    crate::extensions::model::default_codex_args()
 }
 
 fn default_turn_timeout_secs() -> u64 {

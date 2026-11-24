@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
-use super::model::{resolve_codex_binary, DeliveryOutcome, DeliveryRequest};
+use super::model::{default_codex_args, resolve_codex_binary, DeliveryOutcome, DeliveryRequest};
 use super::{AgentHarness, ExtensionError};
 
 const CLIENT_NAME: &str = "switchboard";
@@ -33,7 +33,7 @@ impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             binary: PathBuf::from("codex"),
-            args: vec!["app-server".to_string()],
+            args: default_codex_args(),
             turn_timeout: Duration::from_secs(180),
         }
     }

@@ -11,6 +11,17 @@ use crate::primitives::Timestamp;
 
 use super::ExtensionError;
 
+/// Default arguments for headless `codex app-server` messaging without desktop computer-use hooks.
+pub fn default_codex_args() -> Vec<String> {
+    vec![
+        "app-server".to_string(),
+        "--disable".to_string(),
+        "computer_use".to_string(),
+        "-c".to_string(),
+        "notify=[]".to_string(),
+    ]
+}
+
 /// Resolves the Codex CLI binary, falling back to standard macOS app-bundle locations when
 /// `"codex"` is not present on `PATH`.
 pub fn resolve_codex_binary(configured: &Path) -> PathBuf {
