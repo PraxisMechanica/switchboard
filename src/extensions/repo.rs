@@ -19,10 +19,28 @@ pub fn migrate(conn: &Connection) -> Result<(), ExtensionError> {
             workspace_dir TEXT NOT NULL,
             description TEXT NOT NULL,
             harness TEXT NOT NULL,
+            session_id TEXT,
             created_at_ms INTEGER NOT NULL
         );",
     )
-    .map_err(ExtensionError::Storage)
+    .map_err(ExtensionError::Storage)?;
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(extensions)")
+        .map_err(ExtensionError::Storage)?;
+    let has_session_col = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(ExtensionError::Storage)?
+        .filter_map(Result::ok)
+        .any(|col| col == "session_id");
+    drop(stmt);
+
+    if !has_session_col {
+        conn.execute("ALTER TABLE extensions ADD COLUMN session_id TEXT", [])
+            .map_err(ExtensionError::Storage)?;
+    }
+
+    Ok(())
 }
 
 /// Repository owning CRUD persistence for [`Extension`] records.
@@ -41,22 +59,45 @@ impl ExtensionsRepo {
         let workspace_dir = ext.workspace_dir.to_string_lossy().into_owned();
         let description = ext.description.clone();
         let harness = ext.harness.as_str().to_string();
+        let session_id = ext.session_id.clone();
         let created_at_ms = ext.created_at.as_millis();
 
         self.db
             .exec(move |conn| {
                 conn.execute(
-                    "INSERT INTO extensions (name, workspace_dir, description, harness, created_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    "INSERT INTO extensions (name, workspace_dir, description, harness, session_id, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT(name) DO UPDATE SET
                         workspace_dir = excluded.workspace_dir,
                         description = excluded.description,
                         harness = excluded.harness,
+                        session_id = excluded.session_id,
                         created_at_ms = excluded.created_at_ms",
-                    params![name, workspace_dir, description, harness, created_at_ms],
+                    params![name, workspace_dir, description, harness, session_id, created_at_ms],
                 )
                 .map_err(ExtensionError::Storage)?;
                 Ok(())
+            })
+            .await
+            .map_err(ExtensionError::Database)?
+    }
+
+    pub async fn bind_session(
+        &self,
+        name: &ExtensionName,
+        session_id: &str,
+    ) -> Result<bool, ExtensionError> {
+        let key = name.as_str().to_string();
+        let sid = session_id.to_string();
+        self.db
+            .exec(move |conn| {
+                let affected = conn
+                    .execute(
+                        "UPDATE extensions SET session_id = ?1 WHERE name = ?2",
+                        params![sid, key],
+                    )
+                    .map_err(ExtensionError::Storage)?;
+                Ok(affected > 0)
             })
             .await
             .map_err(ExtensionError::Database)?
@@ -69,7 +110,7 @@ impl ExtensionsRepo {
             .exec(move |conn| {
                 let row = conn
                     .query_row(
-                        "SELECT name, workspace_dir, description, harness, created_at_ms
+                        "SELECT name, workspace_dir, description, harness, session_id, created_at_ms
                          FROM extensions
                          WHERE name = ?1",
                         params![key],
@@ -79,7 +120,8 @@ impl ExtensionsRepo {
                                 r.get::<_, String>(1)?,
                                 r.get::<_, String>(2)?,
                                 r.get::<_, String>(3)?,
-                                r.get::<_, i64>(4)?,
+                                r.get::<_, Option<String>>(4)?,
+                                r.get::<_, i64>(5)?,
                             ))
                         },
                     )
@@ -88,9 +130,21 @@ impl ExtensionsRepo {
 
                 match row {
                     None => Ok(None),
-                    Some((name, workspace_dir, description, harness, created_at_ms)) => Ok(Some(
-                        parse_row(name, workspace_dir, description, harness, created_at_ms)?,
-                    )),
+                    Some((
+                        name,
+                        workspace_dir,
+                        description,
+                        harness,
+                        session_id,
+                        created_at_ms,
+                    )) => Ok(Some(parse_row(
+                        name,
+                        workspace_dir,
+                        description,
+                        harness,
+                        session_id,
+                        created_at_ms,
+                    )?)),
                 }
             })
             .await
@@ -102,7 +156,7 @@ impl ExtensionsRepo {
             .exec(|conn| {
                 let mut stmt = conn
                     .prepare(
-                        "SELECT name, workspace_dir, description, harness, created_at_ms
+                        "SELECT name, workspace_dir, description, harness, session_id, created_at_ms
                          FROM extensions
                          ORDER BY name ASC",
                     )
@@ -115,20 +169,22 @@ impl ExtensionsRepo {
                             r.get::<_, String>(1)?,
                             r.get::<_, String>(2)?,
                             r.get::<_, String>(3)?,
-                            r.get::<_, i64>(4)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, i64>(5)?,
                         ))
                     })
                     .map_err(ExtensionError::Storage)?;
 
                 let mut extensions = Vec::new();
                 for row in rows {
-                    let (name, workspace_dir, description, harness, created_at_ms) =
+                    let (name, workspace_dir, description, harness, session_id, created_at_ms) =
                         row.map_err(ExtensionError::Storage)?;
                     extensions.push(parse_row(
                         name,
                         workspace_dir,
                         description,
                         harness,
+                        session_id,
                         created_at_ms,
                     )?);
                 }
@@ -159,6 +215,7 @@ fn parse_row(
     workspace_dir: String,
     description: String,
     raw_harness: String,
+    session_id: Option<String>,
     created_at_ms: i64,
 ) -> Result<Extension, ExtensionError> {
     let name = ExtensionName::new(&raw_name)
@@ -171,6 +228,7 @@ fn parse_row(
         workspace_dir: PathBuf::from(workspace_dir),
         description,
         harness,
+        session_id,
         created_at: Timestamp::from_millis(created_at_ms),
     })
 }

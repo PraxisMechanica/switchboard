@@ -7,12 +7,13 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+const EXISTING_SESSION_ID: &str = "019a20e4-80cc-7754-b584-33393adcc1f5";
+
 const FAKE_CODEX_SCRIPT: &str = r#"
 import json
 import sys
 
-threads = {}
-counter = 0
+threads = {"019a20e4-80cc-7754-b584-33393adcc1f5": []}
 
 for raw in sys.stdin:
     line = raw.strip()
@@ -28,13 +29,13 @@ for raw in sys.stdin:
     elif method == "initialized":
         continue
     elif method == "thread/start":
-        counter += 1
-        tid = f"cli-thread-{counter}"
-        threads[tid] = []
-        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"threadId": tid}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "thread/start forbidden"}}), flush=True)
+        sys.exit(1)
     elif method == "thread/resume":
         tid = params["threadId"]
-        threads.setdefault(tid, [])
+        if tid not in threads:
+            print(json.dumps({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32004, "message": "unknown thread"}}), flush=True)
+            sys.exit(1)
         print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"threadId": tid}}), flush=True)
     elif method == "turn/start":
         tid = params["threadId"]
@@ -160,7 +161,7 @@ fn two_real_daemons_complete_full_cli_lifecycle_including_revocation() {
     assert_eq!(alice_who["handle"], "alice");
     assert_eq!(bob_who["handle"], "bob");
 
-    // 2. Register Bob's callable extension.
+    // 2. Register Bob's callable extension bound to a pre-existing session.
     run_cli_ok(
         &bob_cfg,
         &[
@@ -171,6 +172,8 @@ fn two_real_daemons_complete_full_cli_lifecycle_including_revocation() {
             bob_ws.to_str().unwrap(),
             "--desc",
             "Orders HTTP API",
+            "--session",
+            EXISTING_SESSION_ID,
         ],
     );
 
@@ -221,7 +224,7 @@ fn two_real_daemons_complete_full_cli_lifecycle_including_revocation() {
 
     run_cli_ok(&bob_cfg, &["approve", "alice"]);
 
-    // 7. Turn 1: Alice calls bob/api over real IPC + Iroh QUIC -> wakes fake Codex app-server.
+    // 7. Turn 1: Alice calls bob/api over real IPC + Iroh QUIC -> resumes existing Codex session.
     let call_out = run_cli_ok(
         &alice_cfg,
         &[
@@ -233,17 +236,23 @@ fn two_real_daemons_complete_full_cli_lifecycle_including_revocation() {
     );
     let turn1: serde_json::Value = serde_json::from_str(&call_out).unwrap();
     assert_eq!(turn1["status"], "replied");
-    assert!(turn1["body"].as_str().unwrap().contains("cli-thread-1"));
+    assert!(turn1["body"]
+        .as_str()
+        .unwrap()
+        .contains(EXISTING_SESSION_ID));
     let call_id = turn1["call_id"].as_str().unwrap().to_string();
 
-    // 8. Turn 2: Alice replies on the same call_id with --done -> resumes cli-thread-1.
+    // 8. Turn 2: Alice replies on the same call_id with --done -> resumes the same session.
     let reply_out = run_cli_ok(
         &alice_cfg,
         &["reply", &call_id, "And for EUR?", "--done", "--json"],
     );
     let turn2: serde_json::Value = serde_json::from_str(&reply_out).unwrap();
     assert_eq!(turn2["status"], "replied");
-    assert!(turn2["body"].as_str().unwrap().contains("cli-thread-1"));
+    assert!(turn2["body"]
+        .as_str()
+        .unwrap()
+        .contains(EXISTING_SESSION_ID));
 
     // 9. History shows both turns on Alice's side.
     let hist: serde_json::Value =

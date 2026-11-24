@@ -13,11 +13,11 @@ use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::codex_policy::{
-    default_codex_args, denial_response_for_server_request, extract_completed_agent_message,
-    extract_delta_text, extract_thread_id, format_prompt, prepare_isolated_codex_home,
-    rpc_error_message, thread_start_params, turn_start_params,
+    build_effective_codex_args, default_codex_args, denial_response_for_server_request,
+    extract_completed_agent_message, extract_delta_text, extract_thread_id, extract_thread_list,
+    format_prompt, rpc_error_message, thread_resume_params, turn_start_params,
 };
-use super::model::{resolve_codex_binary, DeliveryOutcome, DeliveryRequest};
+use super::model::{resolve_codex_binary, CodexSessionInfo, DeliveryOutcome, DeliveryRequest};
 use super::{AgentHarness, ExtensionError};
 
 const CLIENT_NAME: &str = "switchboard";
@@ -61,6 +61,70 @@ impl CodexHarness {
     pub fn config(&self) -> &CodexConfig {
         &self.config
     }
+
+    /// Lists pre-existing Codex sessions via read-only `codex app-server` `thread/list`.
+    pub async fn list_sessions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<CodexSessionInfo>, ExtensionError> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut session = CodexSession::spawn(&self.config, &cwd)?;
+        let cancel = CancellationToken::new();
+        let deadline = tokio::time::sleep(Duration::from_secs(15));
+        tokio::pin!(deadline);
+
+        let init_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": CLIENT_NAME,
+                    "title": CLIENT_TITLE,
+                    "version": CLIENT_VERSION
+                }
+            }
+        });
+        if let RpcStep::Outcome(outcome) = session
+            .rpc_call(1, &init_req, deadline.as_mut(), &cancel, "initialize")
+            .await?
+        {
+            return Err(ExtensionError::Protocol(format!(
+                "codex initialize failed while listing sessions: {outcome:?}"
+            )));
+        }
+
+        let initialized_note = json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        });
+        if session.send_json(&initialized_note).await.is_err() {
+            return Err(ExtensionError::Protocol(
+                "codex exited before thread/list".into(),
+            ));
+        }
+
+        let list_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "thread/list",
+            "params": { "limit": limit }
+        });
+        let resp = match session
+            .rpc_call(2, &list_req, deadline.as_mut(), &cancel, "thread/list")
+            .await?
+        {
+            RpcStep::Response(msg) => msg,
+            RpcStep::Outcome(outcome) => {
+                return Err(ExtensionError::Protocol(format!(
+                    "codex thread/list interrupted: {outcome:?}"
+                )));
+            }
+        };
+        session.shutdown().await;
+        Ok(extract_thread_list(&resp))
+    }
 }
 
 #[async_trait::async_trait]
@@ -73,13 +137,16 @@ impl AgentHarness for CodexHarness {
         if cancel.is_cancelled() {
             return Ok(DeliveryOutcome::Cancelled);
         }
+        if req.session_id.trim().is_empty() {
+            return Err(ExtensionError::SessionRequired(req.extension.to_string()));
+        }
 
         tracing::debug!(
             call_id = %req.call_id,
             extension = %req.extension,
             from_handle = %req.from_handle,
-            has_session = req.existing_session_id.is_some(),
-            "spawning codex app-server for delivery"
+            session_id = %req.session_id,
+            "spawning codex app-server to message existing session"
         );
 
         let mut session = CodexSession::spawn(&self.config, &req.workspace_dir)?;
@@ -116,23 +183,15 @@ impl AgentHarness for CodexHarness {
             return Ok(session.collect_process_failure().await);
         }
 
-        // 3. Thread setup (id: 2)
-        let thread_req = match req.existing_session_id.as_deref() {
-            Some(tid) => json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "thread/resume",
-                "params": { "threadId": tid }
-            }),
-            None => json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "thread/start",
-                "params": thread_start_params(&req.workspace_dir)
-            }),
-        };
+        // 3. Resume pre-existing thread (id: 2) — Switchboard never calls thread/start.
+        let thread_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "thread/resume",
+            "params": thread_resume_params(&req.session_id)
+        });
         let thread_resp = match session
-            .rpc_call(2, &thread_req, deadline.as_mut(), &cancel, "thread setup")
+            .rpc_call(2, &thread_req, deadline.as_mut(), &cancel, "thread/resume")
             .await?
         {
             RpcStep::Response(msg) => msg,
@@ -142,7 +201,7 @@ impl AgentHarness for CodexHarness {
         let Some(thread_id) = extract_thread_id(&thread_resp) else {
             session.shutdown().await;
             return Err(ExtensionError::Protocol(
-                "missing thread id in codex thread setup response".into(),
+                "missing thread id in codex thread/resume response".into(),
             ));
         };
 
@@ -178,15 +237,15 @@ struct CodexSession {
 impl CodexSession {
     fn spawn(config: &CodexConfig, workspace_dir: &Path) -> Result<Self, ExtensionError> {
         let binary = resolve_codex_binary(&config.binary);
+        let args = build_effective_codex_args(&config.args, config.codex_home.as_deref());
         let mut cmd = Command::new(&binary);
-        cmd.args(&config.args)
+        cmd.args(&args)
             .current_dir(workspace_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(home) = &config.codex_home {
-            prepare_isolated_codex_home(home)?;
             cmd.env("CODEX_HOME", home);
         }
         let mut child = cmd.spawn().map_err(|err| {

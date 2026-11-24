@@ -18,7 +18,6 @@ pub const CONFORMANCE_SLOW_MARKER: &str = "CONFORMANCE_SLOW";
 struct StubState {
     scripted_replies: VecDeque<String>,
     delay: Duration,
-    next_session: u64,
     requests: Vec<DeliveryRequest>,
     sessions: Vec<String>,
 }
@@ -119,13 +118,7 @@ impl AgentHarness for StubHarness {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let session_id = match req.existing_session_id.clone() {
-            Some(existing) => existing,
-            None => {
-                guard.next_session += 1;
-                format!("stub-session-{}", guard.next_session)
-            }
-        };
+        let session_id = req.session_id.clone();
 
         guard.sessions.push(session_id.clone());
         let reply = guard
@@ -141,11 +134,12 @@ impl AgentHarness for StubHarness {
     }
 }
 
-/// Verifies that any [`AgentHarness`] satisfies initial delivery, session resume, and cancellation.
+/// Verifies that any [`AgentHarness`] resumes a pre-existing session across turns and honors cancellation.
 pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
     let ext = ExtensionName::new("conformance").expect("valid static extension name");
+    let pre_existing_session = "019a20e4-80cc-7754-b584-33393adcc1f5".to_string();
 
-    // (a) Initial delivery returns Replied with non-empty body and Some(session_id).
+    // (a) First delivery resumes the pre-existing session and returns Replied.
     let first = harness
         .deliver(
             DeliveryRequest {
@@ -154,7 +148,7 @@ pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
                 workspace_dir: workspace.to_path_buf(),
                 from_handle: "alice".to_string(),
                 body: "hello from conformance test".to_string(),
-                existing_session_id: None,
+                session_id: pre_existing_session.clone(),
             },
             CancellationToken::new(),
         )
@@ -168,13 +162,13 @@ pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
                 "initial reply body must be non-empty"
             );
             let sid = session_id.expect("initial reply must return Some(session_id)");
-            assert!(!sid.trim().is_empty(), "session_id must be non-empty");
+            assert_eq!(sid, pre_existing_session);
             sid
         }
         other => panic!("expected DeliveryOutcome::Replied, got {other:?}"),
     };
 
-    // (b) Follow-up delivery with existing_session_id resumes that exact session.
+    // (b) Follow-up delivery continues that exact pre-existing session.
     let followup = harness
         .deliver(
             DeliveryRequest {
@@ -183,7 +177,7 @@ pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
                 workspace_dir: workspace.to_path_buf(),
                 from_handle: "alice".to_string(),
                 body: "follow-up turn".to_string(),
-                existing_session_id: Some(session_id.clone()),
+                session_id: session_id.clone(),
             },
             CancellationToken::new(),
         )
@@ -224,7 +218,7 @@ pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
                 workspace_dir: workspace.to_path_buf(),
                 from_handle: "alice".to_string(),
                 body: format!("{CONFORMANCE_SLOW_MARKER}: hold turn for cancellation"),
-                existing_session_id: Some(session_id),
+                session_id,
             },
             cancel,
         )
@@ -257,7 +251,7 @@ def load_state():
     if os.path.exists(state_path):
         with open(state_path, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"counter": 0, "threads": []}
+    return {"threads": ["019a20e4-80cc-7754-b584-33393adcc1f5"]}
 
 def save_state(state):
     with open(state_path, "w", encoding="utf-8") as f:
@@ -307,16 +301,8 @@ while True:
     elif method == "initialized":
         initialized = True
     elif method == "thread/start":
-        if not initialized:
-            send({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32002, "message": "not initialized"}})
-            sys.exit(1)
-        state = load_state()
-        state["counter"] += 1
-        tid = f"thr_{state['counter']}"
-        state["threads"].append(tid)
-        save_state(state)
-        active_thread = tid
-        send({"jsonrpc": "2.0", "id": msg_id, "result": {"thread": {"id": tid}}})
+        send({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "thread/start forbidden"}})
+        sys.exit(1)
     elif method == "thread/resume":
         tid = params.get("threadId")
         if not initialized or tid not in load_state()["threads"]:
@@ -385,14 +371,14 @@ while True:
         (CodexHarness::new(config), event_log_path)
     }
 
-    fn make_req(dir: &Path, body: &str, existing_session_id: Option<String>) -> DeliveryRequest {
+    fn make_req(dir: &Path, body: &str, session_id: &str) -> DeliveryRequest {
         DeliveryRequest {
             call_id: Uuid::now_v7(),
             extension: ExtensionName::new("backend").unwrap(),
             workspace_dir: dir.to_path_buf(),
             from_handle: "alice".to_string(),
             body: body.to_string(),
-            existing_session_id,
+            session_id: session_id.to_string(),
         }
     }
 
@@ -432,7 +418,7 @@ while True:
         let req = make_req(
             dir.path(),
             &format!("{CONFORMANCE_SLOW_MARKER}: wait"),
-            None,
+            "019a20e4-80cc-7754-b584-33393adcc1f5",
         );
         let outcome = harness.deliver(req, cancel).await.unwrap();
         let _ = waiter.await;
@@ -450,9 +436,10 @@ while True:
         let dir = tempfile::tempdir().unwrap();
         let (harness, _) = write_fake_codex(dir.path(), Duration::from_secs(10));
 
+        let sid = "019a20e4-80cc-7754-b584-33393adcc1f5";
         let delta_only = harness
             .deliver(
-                make_req(dir.path(), "FORCE_DELTA_ONLY", None),
+                make_req(dir.path(), "FORCE_DELTA_ONLY", sid),
                 CancellationToken::new(),
             )
             .await
@@ -464,7 +451,7 @@ while True:
 
         let crash = harness
             .deliver(
-                make_req(dir.path(), "FORCE_CRASH", None),
+                make_req(dir.path(), "FORCE_CRASH", sid),
                 CancellationToken::new(),
             )
             .await
@@ -483,7 +470,7 @@ while True:
                 make_req(
                     dir.path(),
                     &format!("{CONFORMANCE_SLOW_MARKER}: timeout"),
-                    None,
+                    sid,
                 ),
                 CancellationToken::new(),
             )

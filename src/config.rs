@@ -185,14 +185,8 @@ impl SwitchboardConfig {
         self.data_dir.join("phonebook")
     }
 
-    pub fn codex_home_dir(&self) -> PathBuf {
-        self.data_dir.join("codex-home")
-    }
-
     pub fn codex_config(&self) -> CodexConfig {
-        let mut cfg = self.codex.to_codex_config();
-        cfg.codex_home = Some(self.codex_home_dir());
-        cfg
+        self.codex.to_codex_config()
     }
 
     /// Atomically writes a validated TOML configuration file, creating parent directories as needed.

@@ -17,10 +17,12 @@ use uuid::Uuid;
 use crate::db::{Database, DbError};
 use crate::primitives::Clock;
 
-pub use cli::ExtCmd;
+pub use cli::{run_ext_cmd, ExtCmd};
 pub use codex::{CodexConfig, CodexHarness};
 pub use conformance::{verify_harness, StubHarness};
-pub use model::{DeliveryOutcome, DeliveryRequest, Extension, ExtensionName, HarnessKind};
+pub use model::{
+    CodexSessionInfo, DeliveryOutcome, DeliveryRequest, Extension, ExtensionName, HarnessKind,
+};
 pub use repo::{migrate, ExtensionsRepo};
 
 /// Errors returned by the extensions domain and agent harness adapters.
@@ -39,6 +41,9 @@ pub enum ExtensionError {
 
     #[error("extension '{0}' not found")]
     NotFound(String),
+
+    #[error("no pre-existing agent session bound for '{0}'; bind one with `switchboard ext bind` or call <peer>/<session_id> directly")]
+    SessionRequired(String),
 
     #[error("corrupt stored extension data: {0}")]
     CorruptData(String),
@@ -103,20 +108,41 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
         workspace_dir: PathBuf,
         description: String,
         harness: HarnessKind,
+        session_id: Option<String>,
     ) -> Result<Extension, ExtensionError> {
         if workspace_dir.as_os_str().is_empty() {
             return Err(ExtensionError::InvalidWorkspaceDir);
         }
+
+        let clean_session = session_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let ext = Extension {
             name,
             workspace_dir,
             description,
             harness,
+            session_id: clean_session,
             created_at: self.clock.now(),
         };
         self.repo.upsert(&ext).await?;
         Ok(ext)
+    }
+
+    pub async fn bind_session(
+        &self,
+        name: &ExtensionName,
+        session_id: String,
+    ) -> Result<Extension, ExtensionError> {
+        let trimmed = session_id.trim();
+        if trimmed.is_empty() {
+            return Err(ExtensionError::SessionRequired(name.to_string()));
+        }
+        if !self.repo.bind_session(name, trimmed).await? {
+            return Err(ExtensionError::NotFound(name.to_string()));
+        }
+        self.get(name).await
     }
 
     pub async fn list(&self) -> Result<Vec<Extension>, ExtensionError> {
@@ -143,14 +169,33 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
         existing_session_id: Option<String>,
         cancel: CancellationToken,
     ) -> Result<DeliveryOutcome, ExtensionError> {
-        let ext = self.get(ext_name).await?;
+        let (name, workspace_dir, session_id) = match self.repo.get(ext_name).await? {
+            Some(ext) => {
+                let sid = existing_session_id
+                    .or(ext.session_id)
+                    .ok_or_else(|| ExtensionError::SessionRequired(ext.name.to_string()))?;
+                (ext.name, ext.workspace_dir, sid)
+            }
+            None => {
+                let sid = existing_session_id
+                    .or_else(|| {
+                        Uuid::parse_str(ext_name.as_str())
+                            .ok()
+                            .map(|_| ext_name.to_string())
+                    })
+                    .ok_or_else(|| ExtensionError::NotFound(ext_name.to_string()))?;
+                let fallback_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                (ext_name.clone(), fallback_dir, sid)
+            }
+        };
+
         let req = DeliveryRequest {
             call_id,
-            extension: ext.name,
-            workspace_dir: ext.workspace_dir,
+            extension: name,
+            workspace_dir,
             from_handle,
             body,
-            existing_session_id,
+            session_id,
         };
         self.harness.deliver(req, cancel).await
     }
@@ -226,6 +271,7 @@ mod tests {
                 PathBuf::from("/tmp/workspace-a"),
                 "Backend repo".to_string(),
                 HarnessKind::Codex,
+                Some("019a20e4-80cc-7754-b584-33393adcc1f5".to_string()),
             )
             .await
             .unwrap();
@@ -251,6 +297,7 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         };
+        assert_eq!(sid, "019a20e4-80cc-7754-b584-33393adcc1f5");
 
         let second = svc
             .deliver(
@@ -270,6 +317,49 @@ mod tests {
                 session_id: Some(sid),
             }
         );
+
+        // Unbound extension refuses to create a new session.
+        let unbound = ExtensionName::new("unbound").unwrap();
+        svc.add(
+            unbound.clone(),
+            PathBuf::from("/tmp/workspace-b"),
+            "Unbound".to_string(),
+            HarnessKind::Codex,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            svc.deliver(
+                &unbound,
+                Uuid::now_v7(),
+                "alice".to_string(),
+                "ping".to_string(),
+                None,
+                CancellationToken::new(),
+            )
+            .await,
+            Err(ExtensionError::SessionRequired(_))
+        ));
+
+        // Direct arbitrary pre-existing session UUID works without registration.
+        let direct_uuid = ExtensionName::new("01a20e4a-a5b2-77e0-bd3f-2e46d42b8ebd").unwrap();
+        let direct = svc
+            .deliver(
+                &direct_uuid,
+                Uuid::now_v7(),
+                "alice".to_string(),
+                "direct ping".to_string(),
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            direct,
+            DeliveryOutcome::Replied { session_id: Some(ref s), .. }
+                if s == "01a20e4a-a5b2-77e0-bd3f-2e46d42b8ebd"
+        ));
 
         assert!(svc.remove(&name).await.unwrap());
         assert!(!svc.remove(&name).await.unwrap());

@@ -15,9 +15,7 @@ use switchboard::directory::{
     AdvertisedExtension, DirectoryCmd, DirectoryPort, DirectoryService, GitPhonebook,
     MemoryDirectory, PeerCard,
 };
-use switchboard::extensions::{
-    CodexHarness, ExtCmd, ExtensionName, ExtensionsService, HarnessKind,
-};
+use switchboard::extensions::{run_ext_cmd, CodexHarness, ExtCmd, ExtensionsService};
 use switchboard::identity::cli::{InitArgs, WhoamiArgs};
 use switchboard::identity::IdentityService;
 use switchboard::ipc::{self, IpcRequest, IpcResponse};
@@ -267,49 +265,7 @@ async fn run_directory_cmd<D: DirectoryPort>(
 }
 
 async fn cmd_ext(cfg: &SwitchboardConfig, db: Database, cmd: ExtCmd) -> Result<()> {
-    let svc = ExtensionsService::new(db, CodexHarness::new(cfg.codex_config()), SystemClock);
-    match cmd {
-        ExtCmd::Add {
-            name,
-            dir,
-            desc,
-            harness,
-        } => {
-            let ext_name = ExtensionName::new(&name)?;
-            let kind: HarnessKind = harness.parse()?;
-            let ext = svc.add(ext_name, dir, desc, kind).await?;
-            println!(
-                "Registered extension '{}' -> {} ({})",
-                ext.name,
-                ext.workspace_dir.display(),
-                ext.harness
-            );
-        }
-        ExtCmd::Ls { json } => {
-            let exts = svc.list().await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&exts)?);
-            } else {
-                for ext in exts {
-                    println!(
-                        "{:<16} {:<8} {} — {}",
-                        ext.name,
-                        ext.harness,
-                        ext.workspace_dir.display(),
-                        ext.description
-                    );
-                }
-            }
-        }
-        ExtCmd::Rm { name } => {
-            let ext_name = ExtensionName::new(&name)?;
-            if svc.remove(&ext_name).await? {
-                println!("Removed extension '{ext_name}'.");
-            } else {
-                println!("Extension '{ext_name}' not found.");
-            }
-        }
-    }
+    run_ext_cmd(cfg.codex_config(), db, cmd).await?;
     Ok(())
 }
 

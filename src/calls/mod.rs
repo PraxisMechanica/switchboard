@@ -364,6 +364,14 @@ where
                 status: CallResponseStatus::ExtensionNotFound,
                 body: format!("extension '{name}' not registered"),
             },
+            Err(ExtensionError::SessionRequired(name)) => CallResponse {
+                call_id: req.call_id,
+                message_id: req.message_id,
+                status: CallResponseStatus::HarnessFailed,
+                body: format!(
+                    "extension '{name}' has no pre-existing session bound; bind one with `switchboard ext bind` or call <peer>/<session_id> directly"
+                ),
+            },
             Err(err) => return Err(CallError::Extension(err)),
         };
 

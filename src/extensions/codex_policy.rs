@@ -5,32 +5,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::model::DeliveryRequest;
-use super::ExtensionError;
+use super::model::{CodexSessionInfo, DeliveryRequest};
 
-/// System instructions injected on every Switchboard Codex thread to keep calls message-only.
+/// System instructions injected on every Switchboard Codex turn to keep calls message-only.
 pub const TEXT_ONLY_DEVELOPER_INSTRUCTIONS: &str = "You are receiving an agent-to-agent text message delivered via Switchboard. Reply in plain text only. Do not run shell commands, edit files, open browsers, or invoke external tools or MCP servers.";
-
-const ISOLATED_CODEX_CONFIG: &str = r#"# Managed by Switchboard for isolated text-only agent-to-agent messaging.
-notify = []
-approval_policy = "on-request"
-sandbox_mode = "read-only"
-
-[features]
-computer_use = false
-browser_use = false
-browser_use_external = false
-browser_use_full_cdp_access = false
-in_app_browser = false
-in_app_local_automation = false
-apps = false
-plugins = false
-hooks = false
-shell_tool = false
-unified_exec = false
-code_mode_host = false
-image_generation = false
-"#;
 
 /// Defense-in-depth CLI arguments for headless text-only `codex app-server` messaging.
 pub fn default_codex_args() -> Vec<String> {
@@ -72,45 +50,71 @@ pub fn default_codex_args() -> Vec<String> {
     .collect()
 }
 
-/// Prepares an isolated `CODEX_HOME` directory with zero MCP servers, zero plugins, and
-/// read-only message-only config while reusing the user's existing `auth.json` when present.
-pub fn prepare_isolated_codex_home(home_dir: &Path) -> Result<(), ExtensionError> {
-    fs::create_dir_all(home_dir)?;
-
-    let config_path = home_dir.join("config.toml");
-    fs::write(&config_path, ISOLATED_CODEX_CONFIG)?;
-
-    if let Some(source_auth) = default_user_codex_auth_path() {
-        link_auth_file(&source_auth, &home_dir.join("auth.json"))?;
+/// Appends `-c mcp_servers.<name>.enabled=false` for every MCP server declared in the active
+/// Codex `config.toml` so `codex app-server` can resume pre-existing `~/.codex` sessions without
+/// launching desktop computer-use, browser, or third-party MCP processes.
+pub fn build_effective_codex_args(
+    base_args: &[String],
+    codex_home_override: Option<&Path>,
+) -> Vec<String> {
+    let mut args = base_args.to_vec();
+    if args.first().map(String::as_str) != Some("app-server") {
+        return args;
     }
 
-    Ok(())
-}
-
-fn default_user_codex_auth_path() -> Option<PathBuf> {
-    let user_home = std::env::var_os("HOME")?;
-    let auth = PathBuf::from(user_home).join(".codex").join("auth.json");
-    auth.is_file().then_some(auth)
-}
-
-fn link_auth_file(source: &Path, dest: &Path) -> Result<(), ExtensionError> {
-    if dest.exists() || dest.symlink_metadata().is_ok() {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        if std::os::unix::fs::symlink(source, dest).is_ok() {
-            return Ok(());
+    if let Some(config_path) = resolve_codex_config_path(codex_home_override) {
+        if let Ok(raw) = fs::read_to_string(config_path) {
+            for name in extract_mcp_server_names(&raw) {
+                let key = format_toml_key(&name);
+                args.push("-c".to_string());
+                args.push(format!("mcp_servers.{key}.enabled=false"));
+            }
         }
     }
-    fs::copy(source, dest)?;
-    Ok(())
+
+    args
 }
 
-/// Builds JSON-RPC `thread/start` params enforcing read-only text-only behavior.
-pub fn thread_start_params(workspace_dir: &Path) -> Value {
+fn resolve_codex_config_path(codex_home_override: Option<&Path>) -> Option<PathBuf> {
+    if let Some(home) = codex_home_override {
+        return Some(home.join("config.toml"));
+    }
+    if let Some(env_home) = std::env::var_os("CODEX_HOME") {
+        return Some(PathBuf::from(env_home).join("config.toml"));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex").join("config.toml"))
+}
+
+pub(crate) fn extract_mcp_server_names(raw_toml: &str) -> Vec<String> {
+    let Ok(parsed) = toml::from_str::<toml::Value>(raw_toml) else {
+        return Vec::new();
+    };
+    let Some(table) = parsed.get("mcp_servers").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = table.keys().cloned().collect();
+    names.sort();
+    names
+}
+
+fn format_toml_key(name: &str) -> String {
+    let is_bare = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if is_bare {
+        name.to_string()
+    } else {
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    }
+}
+
+/// Builds JSON-RPC `thread/resume` params enforcing read-only text-only behavior on an existing
+/// Codex session. Switchboard never calls `thread/start`.
+pub fn thread_resume_params(thread_id: &str) -> Value {
     json!({
-        "cwd": workspace_dir.to_string_lossy(),
+        "threadId": thread_id,
         "sandbox": "read-only",
         "approvalPolicy": "on-request",
         "developerInstructions": TEXT_ONLY_DEVELOPER_INSTRUCTIONS
@@ -207,6 +211,47 @@ pub(crate) fn extract_thread_id(msg: &Value) -> Option<String> {
         })
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
+}
+
+pub(crate) fn extract_thread_list(msg: &Value) -> Vec<CodexSessionInfo> {
+    let Some(items) = msg
+        .get("result")
+        .and_then(|r| r.get("data"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?.to_string();
+            let cwd = item
+                .get("cwd")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let title = item
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| item.get("preview").and_then(Value::as_str))
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
+            let updated_at = item
+                .get("updatedAt")
+                .and_then(Value::as_i64)
+                .or_else(|| item.get("createdAt").and_then(Value::as_i64));
+            Some(CodexSessionInfo {
+                id,
+                cwd,
+                title,
+                updated_at,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn extract_delta_text(params: &Value) -> Option<&str> {

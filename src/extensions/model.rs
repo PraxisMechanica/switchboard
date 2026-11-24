@@ -111,17 +111,30 @@ impl FromStr for HarnessKind {
     }
 }
 
-/// Registered callable local workspace extension.
+/// Registered callable local workspace extension bound to a pre-existing agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Extension {
     pub name: ExtensionName,
     pub workspace_dir: PathBuf,
     pub description: String,
     pub harness: HarnessKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub created_at: Timestamp,
 }
 
+/// Summary of an existing Codex session discovered via `thread/list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexSessionInfo {
+    pub id: String,
+    pub cwd: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
 /// Input payload passed to an [`AgentHarness`](super::AgentHarness) for one call turn.
+/// Always requires a pre-existing `session_id`; Switchboard never spawns new agent sessions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryRequest {
     pub call_id: Uuid,
@@ -129,7 +142,7 @@ pub struct DeliveryRequest {
     pub workspace_dir: PathBuf,
     pub from_handle: String,
     pub body: String,
-    pub existing_session_id: Option<String>,
+    pub session_id: String,
 }
 
 /// Terminal outcome produced by an [`AgentHarness`](super::AgentHarness) delivery attempt.

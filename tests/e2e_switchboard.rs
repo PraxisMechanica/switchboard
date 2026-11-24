@@ -24,12 +24,17 @@ use switchboard::transport::{
     FrameKind, IrohTransport, MemoryHub, NetworkMode, PeerDialer, WireFrame,
 };
 
+const PRE_EXISTING_API_THREAD: &str = "019a20e4-80cc-7754-b584-33393adcc1f5";
+const PRE_EXISTING_ARBITRARY_THREAD: &str = "01a20e4a-a5b2-77e0-bd3f-2e46d42b8ebd";
+
 const FAKE_CODEX_APP_SERVER: &str = r#"
 import json
 import sys
 
-threads = {}
-counter = 0
+threads = {
+    "019a20e4-80cc-7754-b584-33393adcc1f5": [],
+    "01a20e4a-a5b2-77e0-bd3f-2e46d42b8ebd": [],
+}
 
 for raw in sys.stdin:
     line = raw.strip()
@@ -45,13 +50,13 @@ for raw in sys.stdin:
     elif method == "initialized":
         continue
     elif method == "thread/start":
-        counter += 1
-        tid = f"codex-thread-{counter}"
-        threads[tid] = []
-        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"threadId": tid}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "thread/start forbidden"}}), flush=True)
+        sys.exit(1)
     elif method == "thread/resume":
         tid = params["threadId"]
-        threads.setdefault(tid, [])
+        if tid not in threads:
+            print(json.dumps({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32004, "message": "unknown thread"}}), flush=True)
+            sys.exit(1)
         print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"threadId": tid}}), flush=True)
     elif method == "turn/start":
         tid = params["threadId"]
@@ -166,13 +171,14 @@ async fn full_iroh_git_phonebook_human_approval_and_codex_multi_turn_e2e() {
     let bob_loop = tokio::spawn(Arc::clone(&bob).run_accept_loop(cancel.child_token()));
     let alice_loop = tokio::spawn(Arc::clone(&alice).run_accept_loop(cancel.child_token()));
 
-    // 1. Bob registers an extension and both publish signed peer cards to the Git phone book.
+    // 1. Bob registers an extension bound to a pre-existing Codex session.
     bob.extensions
         .add(
             ExtensionName::new("api").unwrap(),
             workspace,
             "Orders HTTP API".to_string(),
             HarnessKind::Codex,
+            Some(PRE_EXISTING_API_THREAD.to_string()),
         )
         .await
         .unwrap();
@@ -233,7 +239,7 @@ async fn full_iroh_git_phonebook_human_approval_and_codex_multi_turn_e2e() {
     assert_eq!(approved_alice.status, PeerStatus::Approved);
     assert!(alice.peers.authorize(bob_ep.peer_id).await.is_ok());
 
-    // 6. Turn 1: Alice calls `bob/api` -> wakes Bob's Codex App Server via `thread/start`.
+    // 6. Turn 1: Alice calls `bob/api` -> resumes Bob's bound pre-existing session via `thread/resume`.
     let turn1 = alice
         .call_extension(
             "bob/api",
@@ -244,11 +250,10 @@ async fn full_iroh_git_phonebook_human_approval_and_codex_multi_turn_e2e() {
         .await
         .unwrap();
     assert_eq!(turn1.status, CallResponseStatus::Replied);
-    assert!(turn1.body.contains("thread=codex-thread-1"));
+    assert!(turn1.body.contains(PRE_EXISTING_API_THREAD));
     assert!(turn1.body.contains("turn=1"));
 
-    // 7. Turn 2: Alice replies on the same CallId -> Bob's Codex App Server runs `thread/resume`
-    //    with the persisted session ID (`codex-thread-1`).
+    // 7. Turn 2: Alice replies on the same CallId -> resumes the same pre-existing session.
     let turn2 = alice
         .reply_call(
             turn1.call_id,
@@ -260,16 +265,28 @@ async fn full_iroh_git_phonebook_human_approval_and_codex_multi_turn_e2e() {
         .await
         .unwrap();
     assert_eq!(turn2.status, CallResponseStatus::Replied);
-    assert!(turn2.body.contains("thread=codex-thread-1"));
-    assert!(turn2.body.contains("turn=1") || turn2.body.contains("turn=2"));
+    assert!(turn2.body.contains(PRE_EXISTING_API_THREAD));
 
     // Confirm Bob persisted the exact Codex thread ID on the call record.
     let (bob_call, bob_msgs) = bob.calls.history(turn1.call_id).await.unwrap();
     assert_eq!(
         bob_call.harness_session_id.as_deref(),
-        Some("codex-thread-1")
+        Some(PRE_EXISTING_API_THREAD)
     );
     assert_eq!(bob_msgs.len(), 2);
+
+    // 8. Alice can also message an arbitrary pre-existing Codex session directly by UUID.
+    let direct = alice
+        .call_extension(
+            &format!("bob/{PRE_EXISTING_ARBITRARY_THREAD}"),
+            "Status check on arbitrary existing session".to_string(),
+            None,
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
+    assert_eq!(direct.status, CallResponseStatus::Replied);
+    assert!(direct.body.contains(PRE_EXISTING_ARBITRARY_THREAD));
 
     let (alice_call, alice_msgs) = alice.calls.history(turn1.call_id).await.unwrap();
     assert_eq!(alice_call.status, CallStatus::Closed);
@@ -309,6 +326,7 @@ async fn inbound_call_idempotency_replays_cached_reply_and_rejects_mismatched_pa
             PathBuf::from("/tmp/ws"),
             "API".to_string(),
             HarnessKind::Codex,
+            Some(PRE_EXISTING_API_THREAD.to_string()),
         )
         .await
         .unwrap();
