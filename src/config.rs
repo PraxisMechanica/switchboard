@@ -84,6 +84,7 @@ impl CodexSection {
             binary: self.binary.clone(),
             args: self.args.clone(),
             turn_timeout: Duration::from_secs(self.turn_timeout_secs),
+            codex_home: None,
         }
     }
 }
@@ -182,6 +183,16 @@ impl SwitchboardConfig {
 
     pub fn phonebook_dir(&self) -> PathBuf {
         self.data_dir.join("phonebook")
+    }
+
+    pub fn codex_home_dir(&self) -> PathBuf {
+        self.data_dir.join("codex-home")
+    }
+
+    pub fn codex_config(&self) -> CodexConfig {
+        let mut cfg = self.codex.to_codex_config();
+        cfg.codex_home = Some(self.codex_home_dir());
+        cfg
     }
 
     /// Atomically writes a validated TOML configuration file, creating parent directories as needed.

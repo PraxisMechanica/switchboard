@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod codex;
+pub mod codex_policy;
 pub mod conformance;
 pub mod model;
 pub mod repo;

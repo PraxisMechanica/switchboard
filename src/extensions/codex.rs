@@ -12,7 +12,12 @@ use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
-use super::model::{default_codex_args, resolve_codex_binary, DeliveryOutcome, DeliveryRequest};
+use super::codex_policy::{
+    default_codex_args, denial_response_for_server_request, extract_completed_agent_message,
+    extract_delta_text, extract_thread_id, format_prompt, prepare_isolated_codex_home,
+    rpc_error_message, thread_start_params, turn_start_params,
+};
+use super::model::{resolve_codex_binary, DeliveryOutcome, DeliveryRequest};
 use super::{AgentHarness, ExtensionError};
 
 const CLIENT_NAME: &str = "switchboard";
@@ -27,6 +32,8 @@ pub struct CodexConfig {
     pub binary: PathBuf,
     pub args: Vec<String>,
     pub turn_timeout: Duration,
+    /// Optional isolated `CODEX_HOME` directory (zero MCP servers, zero plugins, read-only).
+    pub codex_home: Option<PathBuf>,
 }
 
 impl Default for CodexConfig {
@@ -35,6 +42,7 @@ impl Default for CodexConfig {
             binary: PathBuf::from("codex"),
             args: default_codex_args(),
             turn_timeout: Duration::from_secs(180),
+            codex_home: None,
         }
     }
 }
@@ -120,7 +128,7 @@ impl AgentHarness for CodexHarness {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "thread/start",
-                "params": { "cwd": req.workspace_dir.to_string_lossy() }
+                "params": thread_start_params(&req.workspace_dir)
             }),
         };
         let thread_resp = match session
@@ -144,10 +152,7 @@ impl AgentHarness for CodexHarness {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/start",
-            "params": {
-                "threadId": thread_id,
-                "input": [{ "type": "text", "text": formatted_prompt }]
-            }
+            "params": turn_start_params(&thread_id, &formatted_prompt)
         });
         if session.send_json(&turn_req).await.is_err() {
             return Ok(session.collect_process_failure().await);
@@ -173,17 +178,20 @@ struct CodexSession {
 impl CodexSession {
     fn spawn(config: &CodexConfig, workspace_dir: &Path) -> Result<Self, ExtensionError> {
         let binary = resolve_codex_binary(&config.binary);
-        let mut child = Command::new(&binary)
-            .args(&config.args)
+        let mut cmd = Command::new(&binary);
+        cmd.args(&config.args)
             .current_dir(workspace_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|err| {
-                ExtensionError::Spawn(format!("binary '{}': {err}", binary.display()))
-            })?;
+            .kill_on_drop(true);
+        if let Some(home) = &config.codex_home {
+            prepare_isolated_codex_home(home)?;
+            cmd.env("CODEX_HOME", home);
+        }
+        let mut child = cmd.spawn().map_err(|err| {
+            ExtensionError::Spawn(format!("binary '{}': {err}", binary.display()))
+        })?;
 
         let stdin = child
             .stdin
@@ -310,6 +318,11 @@ impl CodexSession {
                 continue;
             }
 
+            if let Some(denial) = denial_response_for_server_request(&msg) {
+                let _ = self.send_json(&denial).await;
+                continue;
+            }
+
             let Some(method) = msg.get("method").and_then(Value::as_str) else {
                 continue;
             };
@@ -397,16 +410,6 @@ impl CodexSession {
     }
 }
 
-fn format_prompt(req: &DeliveryRequest) -> String {
-    format!(
-        "Incoming switchboard message from peer @{from} (extension: {ext}, call: {call_id}):\n\n{body}",
-        from = req.from_handle,
-        ext = req.extension,
-        call_id = req.call_id,
-        body = req.body,
-    )
-}
-
 async fn write_json_line(stdin: &mut ChildStdin, payload: &Value) -> Result<(), ExtensionError> {
     let mut line = serde_json::to_string(payload).map_err(|err| {
         ExtensionError::Protocol(format!("failed to serialize rpc message: {err}"))
@@ -415,64 +418,6 @@ async fn write_json_line(stdin: &mut ChildStdin, payload: &Value) -> Result<(), 
     stdin.write_all(line.as_bytes()).await?;
     stdin.flush().await?;
     Ok(())
-}
-
-fn rpc_error_message(msg: &Value) -> Option<String> {
-    let err = msg.get("error").filter(|v| !v.is_null())?;
-    let text = err
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown json-rpc error");
-    Some(text.to_string())
-}
-
-fn extract_thread_id(msg: &Value) -> Option<String> {
-    let result = msg.get("result")?;
-    result
-        .get("threadId")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            result
-                .get("thread")
-                .and_then(|t| t.get("id"))
-                .and_then(Value::as_str)
-        })
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn extract_delta_text(params: &Value) -> Option<&str> {
-    params
-        .get("delta")
-        .and_then(Value::as_str)
-        .or_else(|| params.get("text").and_then(Value::as_str))
-}
-
-fn extract_completed_agent_message(params: &Value) -> Option<String> {
-    let item = params.get("item")?;
-    if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
-        return None;
-    }
-
-    if let Some(text) = item
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        return Some(text.to_string());
-    }
-
-    if let Some(parts) = item.get("content").and_then(Value::as_array) {
-        let joined: String = parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect();
-        if !joined.is_empty() {
-            return Some(joined);
-        }
-    }
-
-    None
 }
 
 fn spawn_stderr_drain(mut stderr: ChildStderr) -> JoinHandle<String> {

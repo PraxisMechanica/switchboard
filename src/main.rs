@@ -219,11 +219,8 @@ async fn run_directory_cmd<D: DirectoryPort>(
         DirectoryCmd::Publish => {
             let id_svc = IdentityService::new(db.clone(), SystemClock);
             let local = id_svc.load_required().await?;
-            let ext_svc = ExtensionsService::new(
-                db,
-                CodexHarness::new(cfg.codex.to_codex_config()),
-                SystemClock,
-            );
+            let ext_svc =
+                ExtensionsService::new(db, CodexHarness::new(cfg.codex_config()), SystemClock);
             let exts = ext_svc.list().await?;
             let direct_addrs = match ipc::send_request(&cfg.socket_path(), &IpcRequest::Ping).await
             {
@@ -270,11 +267,7 @@ async fn run_directory_cmd<D: DirectoryPort>(
 }
 
 async fn cmd_ext(cfg: &SwitchboardConfig, db: Database, cmd: ExtCmd) -> Result<()> {
-    let svc = ExtensionsService::new(
-        db,
-        CodexHarness::new(cfg.codex.to_codex_config()),
-        SystemClock,
-    );
+    let svc = ExtensionsService::new(db, CodexHarness::new(cfg.codex_config()), SystemClock);
     match cmd {
         ExtCmd::Add {
             name,

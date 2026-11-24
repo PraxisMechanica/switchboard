@@ -86,6 +86,7 @@ fn fake_codex_config(dir: &TempDir) -> CodexConfig {
         binary: PathBuf::from("python3"),
         args: vec![script.to_string_lossy().to_string()],
         turn_timeout: Duration::from_secs(15),
+        codex_home: None,
     }
 }
 

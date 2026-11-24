@@ -49,7 +49,7 @@ pub async fn run_daemon(cfg: SwitchboardConfig, db: Database) -> Result<()> {
         db,
         transport,
         dir_port,
-        CodexHarness::new(cfg.codex.to_codex_config()),
+        CodexHarness::new(cfg.codex_config()),
         SystemClock,
         UuidV7Gen,
         TracingNotifier,

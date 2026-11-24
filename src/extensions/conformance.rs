@@ -380,6 +380,7 @@ while True:
                 event_log_path.to_string_lossy().into_owned(),
             ],
             turn_timeout: timeout,
+            codex_home: None,
         };
         (CodexHarness::new(config), event_log_path)
     }
