@@ -1,7 +1,7 @@
 //! Domain types for callable local workspace extensions and harness deliveries.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,32 @@ use uuid::Uuid;
 use crate::primitives::Timestamp;
 
 use super::ExtensionError;
+
+/// Resolves the Codex CLI binary, falling back to standard macOS app-bundle locations when
+/// `"codex"` is not present on `PATH`.
+pub fn resolve_codex_binary(configured: &Path) -> PathBuf {
+    if configured != Path::new("codex") {
+        return configured.to_path_buf();
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("codex");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    for bundled in [
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+        "/Applications/Codex.app/Contents/Resources/codex",
+    ] {
+        let candidate = Path::new(bundled);
+        if candidate.is_file() {
+            return candidate.to_path_buf();
+        }
+    }
+    configured.to_path_buf()
+}
 
 /// Validated extension identifier matching `[a-z0-9_-]{1,48}`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

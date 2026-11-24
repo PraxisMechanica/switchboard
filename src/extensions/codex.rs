@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
-use super::model::{DeliveryOutcome, DeliveryRequest};
+use super::model::{resolve_codex_binary, DeliveryOutcome, DeliveryRequest};
 use super::{AgentHarness, ExtensionError};
 
 const CLIENT_NAME: &str = "switchboard";
@@ -172,7 +172,8 @@ struct CodexSession {
 
 impl CodexSession {
     fn spawn(config: &CodexConfig, workspace_dir: &Path) -> Result<Self, ExtensionError> {
-        let mut child = Command::new(&config.binary)
+        let binary = resolve_codex_binary(&config.binary);
+        let mut child = Command::new(&binary)
             .args(&config.args)
             .current_dir(workspace_dir)
             .stdin(Stdio::piped())
@@ -181,7 +182,7 @@ impl CodexSession {
             .kill_on_drop(true)
             .spawn()
             .map_err(|err| {
-                ExtensionError::Spawn(format!("binary '{}': {err}", config.binary.display()))
+                ExtensionError::Spawn(format!("binary '{}': {err}", binary.display()))
             })?;
 
         let stdin = child
