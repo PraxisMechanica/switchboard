@@ -77,6 +77,22 @@ impl ExtensionName {
     }
 }
 
+/// Parses `<user-or-machine>.<harness>.<conversation-name-or-id>` (including `codex://threads/...`)
+/// or legacy `<peer>/<extension>` into `(peer_handle, target_suffix)`.
+pub fn parse_call_target(target: &str) -> Option<(&str, &str)> {
+    let trimmed = target.trim();
+    if let Some((peer, rest)) = trimmed.split_once('.') {
+        if !peer.is_empty() && !peer.contains('/') && rest.contains('.') {
+            return Some((peer, rest));
+        }
+    }
+    let (peer, ext) = trimmed.split_once('/')?;
+    if peer.is_empty() || ext.is_empty() {
+        return None;
+    }
+    Some((peer, ext))
+}
+
 /// Normalizes a human conversation title into a lowercase hyphenated slug for flexible lookup.
 pub fn slugify_title(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());

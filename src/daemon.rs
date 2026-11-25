@@ -487,21 +487,7 @@ fn endpoint_from_card(card: &PeerCard) -> PeerEndpoint {
     }
 }
 
-/// Parses `<user-or-machine>.<harness>.<conversation-name-or-id>` (including `codex://threads/...`)
-/// or legacy `<peer>/<extension>` into `(peer_handle, target_suffix)`.
-pub fn parse_call_target(target: &str) -> Option<(&str, &str)> {
-    let trimmed = target.trim();
-    if let Some((peer, rest)) = trimmed.split_once('.') {
-        if !peer.is_empty() && !peer.contains('/') && rest.contains('.') {
-            return Some((peer, rest));
-        }
-    }
-    let (peer, ext) = trimmed.split_once('/')?;
-    if peer.is_empty() || ext.is_empty() {
-        return None;
-    }
-    Some((peer, ext))
-}
+pub use crate::extensions::model::parse_call_target;
 
 fn error_frame(message: &str) -> WireFrame {
     WireFrame::new(FrameKind::Error, serde_json::json!({ "error": message }))

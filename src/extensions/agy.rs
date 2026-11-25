@@ -175,7 +175,7 @@ impl AgentHarness for MultiHarness {
         if let Ok(agy_sessions) = self.agy.list_sessions(limit).await {
             sessions.extend(agy_sessions);
         }
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
         sessions.truncate(limit);
         Ok(sessions)
     }
@@ -244,7 +244,7 @@ pub(crate) fn discover_agy_brain_sessions(brain_dir: &Path, limit: usize) -> Vec
             updated_at,
         });
     }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
     sessions.truncate(limit);
     sessions
 }
