@@ -66,6 +66,10 @@ if [ -f "${TMPDIR}/SKILL.md" ]; then
   done
 fi
 
+DATA_DIR="${SWITCHBOARD_DATA_DIR:-$HOME/.local/share/switchboard}"
+mkdir -p "${DATA_DIR}"
+printf '%s\n' "${ACTUAL}" > "${DATA_DIR}/installed_archive.sha256"
+
 echo "Installed switchboard ${VERSION} to ${INSTALL_DIR}/switchboard"
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;

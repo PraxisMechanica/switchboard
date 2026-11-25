@@ -17,6 +17,7 @@ use switchboard::identity::{IdentityService, LocalKeypair, PeerId, Signed};
 use switchboard::ipc::{self, IpcRequest, IpcResponse};
 use switchboard::peers::DesktopNotifier;
 use switchboard::primitives::{SystemClock, UuidV7Gen};
+use switchboard::service::{check_and_apply_update, is_dev_build_path, UpdateOutcome};
 use switchboard::transport::{
     InboundExchange, IrohTransport, NetworkMode, PeerDialer, PeerEndpoint, PeerListener,
     TransportError, WireFrame,
@@ -93,8 +94,52 @@ pub async fn run_daemon(cfg: SwitchboardConfig, db: Database) -> Result<()> {
         });
     }
 
+    let auto_update_disabled = std::env::var("SWITCHBOARD_HEADLESS")
+        .is_ok_and(|v| v == "1" || v == "true")
+        || std::env::var("SWITCHBOARD_NO_AUTO_UPDATE").is_ok_and(|v| v == "1" || v == "true");
+    if cfg.update.enabled && !auto_update_disabled {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if !is_dev_build_path(&exe_path) {
+                let upd_cfg = cfg.update.clone();
+                let upd_data_dir = cfg.data_dir.clone();
+                let upd_cancel = cancel.clone();
+                let interval = Duration::from_secs(upd_cfg.interval_secs.max(60));
+                tokio::spawn(async move {
+                    let mut first_wait = Duration::from_secs(30);
+                    loop {
+                        tokio::select! {
+                            _ = upd_cancel.cancelled() => break,
+                            _ = tokio::time::sleep(first_wait) => {}
+                        }
+                        first_wait = interval;
+                        match check_and_apply_update(&upd_cfg, &upd_data_dir, &exe_path, false)
+                            .await
+                        {
+                            Ok(UpdateOutcome::Updated { current, .. }) => {
+                                tracing::info!(
+                                    hash = %current,
+                                    "switchboard binary updated via hash heartbeat; exiting for service respawn"
+                                );
+                                upd_cancel.cancel();
+                                break;
+                            }
+                            Ok(UpdateOutcome::UpToDate { .. } | UpdateOutcome::Skipped(_)) => {}
+                            Err(err) => {
+                                tracing::debug!(error = %err, "update heartbeat check failed");
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("daemon cancellation triggered");
+                break;
+            }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutdown signal received");
                 cancel.cancel();

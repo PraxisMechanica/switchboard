@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -40,7 +41,30 @@ impl GitPhonebook {
     /// Clones the remote repository if absent, otherwise fetches and resets to the default branch.
     pub async fn ensure_repo(&self) -> Result<(), DirectoryError> {
         let _guard = self.op_lock.lock().await;
+        let _file_lock = self.acquire_process_lock().await?;
         self.ensure_repo_locked().await
+    }
+
+    async fn acquire_process_lock(&self) -> Result<std::fs::File, DirectoryError> {
+        let lock_path = process_lock_path(&self.local_dir);
+        tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+            if let Some(parent) = lock_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)?;
+            file.lock()?;
+            Ok(file)
+        })
+        .await
+        .map_err(|err| DirectoryError::Io(std::io::Error::other(err.to_string())))?
+        .map_err(DirectoryError::Io)
     }
 
     async fn ensure_repo_locked(&self) -> Result<(), DirectoryError> {
@@ -78,53 +102,76 @@ impl GitPhonebook {
 #[async_trait::async_trait]
 impl DirectoryPort for GitPhonebook {
     async fn publish(&self, card: Signed<PeerCard>) -> Result<(), DirectoryError> {
+        const MAX_PUBLISH_ATTEMPTS: usize = 5;
+
         let handle = identity::validate_handle(&card.payload.handle)?;
-        let _guard = self.op_lock.lock().await;
-        self.ensure_repo_locked().await?;
-
-        let peers_dir = self.local_dir.join("peers");
-        tokio::fs::create_dir_all(&peers_dir).await?;
-
-        let rel_path = format!("peers/{handle}.json");
-        let card_path = self.local_dir.join(&rel_path);
         let serialized = serde_json::to_string_pretty(&card)?;
-        tokio::fs::write(&card_path, format!("{serialized}\n")).await?;
+        let rel_path = format!("peers/{handle}.json");
+        let commit_msg = format!("publish {handle}");
+        let _guard = self.op_lock.lock().await;
+        let _file_lock = self.acquire_process_lock().await?;
 
-        run_git_checked(Some(&self.local_dir), &["add", "--", &rel_path]).await?;
+        let mut last_err = None;
+        for attempt in 0..MAX_PUBLISH_ATTEMPTS {
+            self.ensure_repo_locked().await?;
 
-        let status = run_git_checked(
-            Some(&self.local_dir),
-            &["status", "--porcelain", "--", &rel_path],
-        )
-        .await?;
-        if status.trim().is_empty() {
-            return Ok(());
+            let peers_dir = self.local_dir.join("peers");
+            tokio::fs::create_dir_all(&peers_dir).await?;
+
+            let card_path = self.local_dir.join(&rel_path);
+            tokio::fs::write(&card_path, format!("{serialized}\n")).await?;
+
+            run_git_checked(Some(&self.local_dir), &["add", "--", &rel_path]).await?;
+
+            let status = run_git_checked(
+                Some(&self.local_dir),
+                &["status", "--porcelain", "--", &rel_path],
+            )
+            .await?;
+            if status.trim().is_empty() {
+                return Ok(());
+            }
+
+            run_git_checked(
+                Some(&self.local_dir),
+                &[
+                    "-c",
+                    "user.name=switchboard",
+                    "-c",
+                    "user.email=switchboard@local",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    &commit_msg,
+                ],
+            )
+            .await?;
+
+            match run_git_checked(Some(&self.local_dir), &["push", "origin", "HEAD"]).await {
+                Ok(_) => return Ok(()),
+                Err(err) if attempt + 1 < MAX_PUBLISH_ATTEMPTS => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        error = %err,
+                        "phonebook push conflict; retrying after fetch"
+                    );
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(50 * (attempt as u64 + 1))).await;
+                }
+                Err(err) => return Err(err),
+            }
         }
 
-        let commit_msg = format!("publish {handle}");
-        run_git_checked(
-            Some(&self.local_dir),
-            &[
-                "-c",
-                "user.name=switchboard",
-                "-c",
-                "user.email=switchboard@local",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-m",
-                &commit_msg,
-            ],
-        )
-        .await?;
-
-        run_git_checked(Some(&self.local_dir), &["push", "origin", "HEAD"]).await?;
-
-        Ok(())
+        Err(last_err.unwrap_or_else(|| DirectoryError::Git {
+            command: "git push origin HEAD".to_string(),
+            details: "exhausted publish retry attempts".to_string(),
+        }))
     }
 
     async fn fetch_all(&self) -> Result<Vec<Signed<PeerCard>>, DirectoryError> {
         let _guard = self.op_lock.lock().await;
+        let _file_lock = self.acquire_process_lock().await?;
         self.ensure_repo_locked().await?;
 
         let peers_dir = self.local_dir.join("peers");
@@ -159,6 +206,12 @@ impl DirectoryPort for GitPhonebook {
 
         Ok(cards)
     }
+}
+
+fn process_lock_path(local_dir: &Path) -> PathBuf {
+    let mut os = local_dir.as_os_str().to_os_string();
+    os.push(".lock");
+    PathBuf::from(os)
 }
 
 async fn resolve_remote_default_ref(repo_dir: &Path) -> Result<Option<String>, DirectoryError> {

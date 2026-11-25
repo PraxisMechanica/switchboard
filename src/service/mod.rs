@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod launchd;
 pub mod systemd;
+pub mod updater;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,6 +16,7 @@ use uuid::Uuid;
 pub use cli::ServiceCmd;
 pub use launchd::LaunchdAdapter;
 pub use systemd::SystemdUserAdapter;
+pub use updater::{check_and_apply_update, is_dev_build_path, UpdateConfig, UpdateOutcome};
 
 /// Default service label used for user-level daemon registration.
 pub const DEFAULT_SERVICE_LABEL: &str = "com.praxis.switchboard";

@@ -8,7 +8,8 @@ use crate::db::Database;
 use crate::primitives::SystemClock;
 
 use super::{
-    CodexConfig, CodexHarness, ExtensionError, ExtensionName, ExtensionsService, HarnessKind,
+    AgentHarness, AgyHarness, CodexConfig, CodexHarness, ExtensionError, ExtensionName,
+    ExtensionsService, HarnessKind, MultiHarness,
 };
 
 /// Subcommands for `switchboard ext`.
@@ -148,6 +149,43 @@ pub async fn run_ext_cmd(
             } else {
                 println!("Extension '{ext_name}' not found.");
             }
+        }
+    }
+    Ok(())
+}
+
+/// Prints pre-existing local Codex and Antigravity sessions formatted as Switchboard addresses.
+pub async fn run_sessions_cmd(
+    codex_cfg: CodexConfig,
+    handle: &str,
+    limit: usize,
+    json: bool,
+) -> Result<(), ExtensionError> {
+    let sessions = MultiHarness::new(CodexHarness::new(codex_cfg), AgyHarness::default())
+        .list_sessions(limit)
+        .await?;
+    if json {
+        let enriched: Vec<_> = sessions
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "address": format!("{handle}.{}.{}", s.harness, s.id),
+                    "harness": s.harness,
+                    "id": s.id,
+                    "cwd": s.cwd,
+                    "title": s.title,
+                    "updated_at": s.updated_at,
+                })
+            })
+            .collect();
+        let rendered = serde_json::to_string_pretty(&enriched)
+            .map_err(|e| ExtensionError::Protocol(e.to_string()))?;
+        println!("{rendered}");
+    } else if sessions.is_empty() {
+        println!("No pre-existing agent sessions found.");
+    } else {
+        for s in sessions {
+            println!("{handle}.{}.{}  {}", s.harness, s.id, s.title);
         }
     }
     Ok(())

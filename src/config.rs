@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::extensions::CodexConfig;
+use crate::service::UpdateConfig;
 use crate::transport::NetworkMode;
 
 #[derive(Debug, Error)]
@@ -107,6 +108,9 @@ pub struct SwitchboardConfig {
 
     #[serde(default)]
     pub codex: CodexSection,
+
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 impl Default for SwitchboardConfig {
@@ -117,6 +121,7 @@ impl Default for SwitchboardConfig {
             network: NetworkMode::GlobalP2p,
             directory: DirectoryConfig::default(),
             codex: CodexSection::default(),
+            update: UpdateConfig::default(),
         }
     }
 }

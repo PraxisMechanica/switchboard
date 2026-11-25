@@ -16,7 +16,7 @@ use switchboard::directory::{
     MemoryDirectory, PeerCard,
 };
 use switchboard::extensions::{
-    run_ext_cmd, AgentHarness, AgyHarness, CodexHarness, ExtCmd, ExtensionsService, MultiHarness,
+    run_ext_cmd, run_sessions_cmd, CodexHarness, ExtCmd, ExtensionsService,
 };
 use switchboard::identity::cli::{InitArgs, WhoamiArgs};
 use switchboard::identity::IdentityService;
@@ -24,7 +24,7 @@ use switchboard::ipc::{self, IpcRequest, IpcResponse};
 use switchboard::peers::cli::{DialArgs, PeerTargetArgs, PeersListArgs};
 use switchboard::peers::{PeersService, TracingNotifier};
 use switchboard::primitives::{Clock, SystemClock};
-use switchboard::service::cli::{run_service_cmd, ServiceCmd};
+use switchboard::service::cli::{run_service_cmd, run_update_cmd, ServiceCmd};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -107,6 +107,13 @@ enum Command {
         #[command(subcommand)]
         cmd: ServiceCmd,
     },
+
+    /// Check the remote SHA256 heartbeat and update the local binary when the hash changes.
+    Update {
+        /// Re-download and reinstall even when the local hash matches.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -140,6 +147,10 @@ async fn main() -> Result<()> {
         Command::History(args) => cmd_history(db, args).await,
         Command::Service { cmd } => {
             run_service_cmd(cmd, cli.config, cfg.data_dir.join("logs"))?;
+            Ok(())
+        }
+        Command::Update { force } => {
+            run_update_cmd(&cfg.update, &cfg.data_dir, force).await?;
             Ok(())
         }
     }
@@ -294,31 +305,7 @@ async fn cmd_sessions(
         .await
         .map(|id| id.handle)
         .unwrap_or_else(|_| "<you>".to_string());
-    let sessions = MultiHarness::new(CodexHarness::new(cfg.codex_config()), AgyHarness::default())
-        .list_sessions(limit)
-        .await?;
-    if json {
-        let enriched: Vec<_> = sessions
-            .into_iter()
-            .map(|s| {
-                serde_json::json!({
-                    "address": format!("{handle}.{}.{}", s.harness, s.id),
-                    "harness": s.harness,
-                    "id": s.id,
-                    "cwd": s.cwd,
-                    "title": s.title,
-                    "updated_at": s.updated_at,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&enriched)?);
-    } else if sessions.is_empty() {
-        println!("No pre-existing agent sessions found.");
-    } else {
-        for s in sessions {
-            println!("{handle}.{}.{}  {}", s.harness, s.id, s.title);
-        }
-    }
+    run_sessions_cmd(cfg.codex_config(), &handle, limit, json).await?;
     Ok(())
 }
 

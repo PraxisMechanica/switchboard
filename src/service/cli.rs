@@ -80,6 +80,31 @@ pub fn run_service_cmd(
     Ok(())
 }
 
+/// Runs a manual hash-heartbeat update check and prints the outcome.
+pub async fn run_update_cmd(
+    cfg: &super::UpdateConfig,
+    data_dir: &std::path::Path,
+    force: bool,
+) -> Result<(), ServiceError> {
+    let exe = std::env::current_exe()?;
+    match super::check_and_apply_update(cfg, data_dir, &exe, force).await? {
+        super::UpdateOutcome::UpToDate { hash } => {
+            println!("Already up to date ({}).", &hash[..12]);
+        }
+        super::UpdateOutcome::Updated { current, .. } => {
+            println!(
+                "Updated {} to {}. Service will respawn if managed by launchd/systemd.",
+                exe.display(),
+                &current[..12]
+            );
+        }
+        super::UpdateOutcome::Skipped(reason) => {
+            println!("Update skipped: {reason}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

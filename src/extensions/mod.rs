@@ -20,7 +20,7 @@ use crate::db::{Database, DbError};
 use crate::primitives::Clock;
 
 pub use agy::{AgyConfig, AgyHarness, MultiHarness};
-pub use cli::{run_ext_cmd, ExtCmd};
+pub use cli::{run_ext_cmd, run_sessions_cmd, ExtCmd};
 pub use codex::{CodexConfig, CodexHarness};
 pub use conformance::{verify_harness, StubHarness};
 pub use model::{
