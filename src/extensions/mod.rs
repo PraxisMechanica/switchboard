@@ -22,7 +22,8 @@ pub use cli::{run_ext_cmd, ExtCmd};
 pub use codex::{CodexConfig, CodexHarness};
 pub use conformance::{verify_harness, StubHarness};
 pub use model::{
-    CodexSessionInfo, DeliveryOutcome, DeliveryRequest, Extension, ExtensionName, HarnessKind,
+    slugify_title, CodexSessionInfo, DeliveryOutcome, DeliveryRequest, Extension, ExtensionName,
+    HarnessKind,
 };
 pub use repo::{migrate, ExtensionsRepo};
 
@@ -30,7 +31,7 @@ pub use repo::{migrate, ExtensionsRepo};
 #[derive(Debug, Error)]
 pub enum ExtensionError {
     #[error(
-        "invalid extension name '{0}': must be 1..=48 lowercase ASCII alphanumeric, '-', or '_'"
+        "invalid target '{0}': must be 1..=160 non-control characters without outer whitespace"
     )]
     InvalidName(String),
 
@@ -43,7 +44,15 @@ pub enum ExtensionError {
     #[error("extension '{0}' not found")]
     NotFound(String),
 
-    #[error("no pre-existing agent session bound for '{0}'; bind one with `switchboard ext bind` or call <peer>/<session_id> directly")]
+    #[error("no pre-existing agent session found matching '{0}'")]
+    SessionNotFound(String),
+
+    #[error(
+        "multiple pre-existing agent sessions ({1}) match '{0}'; use the session UUID instead"
+    )]
+    AmbiguousSession(String, usize),
+
+    #[error("no pre-existing agent session bound for '{0}'; call <peer>.<harness>.<conversation-name-or-id> directly")]
     SessionRequired(String),
 
     #[error("corrupt stored extension data: {0}")]
@@ -73,6 +82,11 @@ pub trait AgentHarness: Send + Sync {
         req: DeliveryRequest,
         cancel: CancellationToken,
     ) -> Result<DeliveryOutcome, ExtensionError>;
+
+    /// Lists pre-existing sessions available in this harness for name/ID resolution.
+    async fn list_sessions(&self, _limit: usize) -> Result<Vec<CodexSessionInfo>, ExtensionError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait::async_trait]
@@ -83,6 +97,10 @@ impl<T: AgentHarness + ?Sized> AgentHarness for Arc<T> {
         cancel: CancellationToken,
     ) -> Result<DeliveryOutcome, ExtensionError> {
         (**self).deliver(req, cancel).await
+    }
+
+    async fn list_sessions(&self, limit: usize) -> Result<Vec<CodexSessionInfo>, ExtensionError> {
+        (**self).list_sessions(limit).await
     }
 }
 
@@ -170,25 +188,49 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
         existing_session_id: Option<String>,
         cancel: CancellationToken,
     ) -> Result<DeliveryOutcome, ExtensionError> {
-        let (name, workspace_dir, session_id) = match self.repo.get(ext_name).await? {
-            Some(ext) => {
-                let sid = existing_session_id
-                    .or(ext.session_id)
-                    .ok_or_else(|| ExtensionError::SessionRequired(ext.name.to_string()))?;
-                (ext.name, ext.workspace_dir, sid)
-            }
-            None => {
-                let sid = existing_session_id
-                    .or_else(|| {
-                        Uuid::parse_str(ext_name.as_str())
-                            .ok()
-                            .map(|_| ext_name.to_string())
-                    })
-                    .ok_or_else(|| ExtensionError::NotFound(ext_name.to_string()))?;
-                let fallback_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                (ext_name.clone(), fallback_dir, sid)
-            }
-        };
+        let fallback_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Primary path: `<harness>.<conversation-name-or-id>` (zero registration required).
+        let (name, workspace_dir, session_id) =
+            if let Some((_harness, raw_conv)) = ext_name.parse_harness_target()? {
+                let conversation = raw_conv
+                    .strip_prefix("codex://threads/")
+                    .unwrap_or(raw_conv)
+                    .trim();
+                if let Some(sid) = existing_session_id {
+                    (ext_name.clone(), fallback_dir, sid)
+                } else if Uuid::parse_str(conversation).is_ok() {
+                    (ext_name.clone(), fallback_dir, conversation.to_string())
+                } else {
+                    let sessions = self.harness.list_sessions(200).await?;
+                    let matched = resolve_session_by_name_or_prefix(&sessions, conversation)?;
+                    let dir = if matched.cwd.is_empty() {
+                        fallback_dir
+                    } else {
+                        PathBuf::from(&matched.cwd)
+                    };
+                    (ext_name.clone(), dir, matched.id.clone())
+                }
+            } else {
+                match self.repo.get(ext_name).await? {
+                    Some(ext) => {
+                        let sid = existing_session_id
+                            .or(ext.session_id)
+                            .ok_or_else(|| ExtensionError::SessionRequired(ext.name.to_string()))?;
+                        (ext.name, ext.workspace_dir, sid)
+                    }
+                    None => {
+                        let sid = existing_session_id
+                            .or_else(|| {
+                                Uuid::parse_str(ext_name.as_str())
+                                    .ok()
+                                    .map(|_| ext_name.to_string())
+                            })
+                            .ok_or_else(|| ExtensionError::NotFound(ext_name.to_string()))?;
+                        (ext_name.clone(), fallback_dir, sid)
+                    }
+                }
+            };
 
         let req = DeliveryRequest {
             call_id,
@@ -202,171 +244,55 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
+fn resolve_session_by_name_or_prefix<'a>(
+    sessions: &'a [CodexSessionInfo],
+    query: &str,
+) -> Result<&'a CodexSessionInfo, ExtensionError> {
+    let q_lower = query.to_ascii_lowercase();
+    let q_slug = slugify_title(query);
 
-    use crate::primitives::FixedClock;
-
-    use super::*;
-
-    #[test]
-    fn extension_name_validation_and_serde_roundtrip() {
-        let ok = ExtensionName::new("backend_api-01").unwrap();
-        assert_eq!(ok.as_str(), "backend_api-01");
-        assert_eq!(ok.to_string(), "backend_api-01");
-        assert_eq!(ExtensionName::from_str("backend_api-01").unwrap(), ok);
-
-        let json = serde_json::to_string(&ok).unwrap();
-        assert_eq!(json, "\"backend_api-01\"");
-        let parsed: ExtensionName = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, ok);
-
-        assert!(matches!(
-            ExtensionName::new(""),
-            Err(ExtensionError::InvalidName(_))
-        ));
-        assert!(matches!(
-            ExtensionName::new("Upper"),
-            Err(ExtensionError::InvalidName(_))
-        ));
-        assert!(matches!(
-            ExtensionName::new("has space"),
-            Err(ExtensionError::InvalidName(_))
-        ));
-        let too_long = "a".repeat(49);
-        assert!(matches!(
-            ExtensionName::new(&too_long),
-            Err(ExtensionError::InvalidName(_))
-        ));
-        assert!(ExtensionName::new(&"a".repeat(48)).is_ok());
+    let exact_id: Vec<_> = sessions.iter().filter(|s| s.id == query).collect();
+    if exact_id.len() == 1 {
+        return Ok(exact_id[0]);
     }
 
-    #[test]
-    fn harness_kind_roundtrips() {
-        assert_eq!(HarnessKind::Codex.to_string(), "codex");
-        assert_eq!(HarnessKind::from_str("codex").unwrap(), HarnessKind::Codex);
-        assert_eq!(
-            serde_json::to_string(&HarnessKind::Codex).unwrap(),
-            "\"codex\""
-        );
-        assert!(matches!(
-            HarnessKind::from_str("unknown"),
-            Err(ExtensionError::UnsupportedHarness(_))
+    let exact_title: Vec<_> = sessions
+        .iter()
+        .filter(|s| {
+            !s.title.is_empty()
+                && (s.title.to_ascii_lowercase() == q_lower
+                    || (!q_slug.is_empty() && slugify_title(&s.title) == q_slug))
+        })
+        .collect();
+    if exact_title.len() == 1 {
+        return Ok(exact_title[0]);
+    }
+    if exact_title.len() > 1 {
+        return Err(ExtensionError::AmbiguousSession(
+            query.to_string(),
+            exact_title.len(),
         ));
     }
 
-    #[tokio::test]
-    async fn extensions_service_crud_and_deliver_roundtrip() {
-        let db = Database::open_in_memory().unwrap();
-        db.with_conn_sync(|c| migrate(c).unwrap());
-
-        let harness = StubHarness::with_replies(["first answer", "second answer"]);
-        let clock = FixedClock::new(1_700_000_000_000);
-        let svc = ExtensionsService::new(db, harness.clone(), clock);
-
-        let name = ExtensionName::new("backend").unwrap();
-        let added = svc
-            .add(
-                name.clone(),
-                PathBuf::from("/tmp/workspace-a"),
-                "Backend repo".to_string(),
-                HarnessKind::Codex,
-                Some("019a20e4-80cc-7754-b584-33393adcc1f5".to_string()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(added.name, name);
-        assert_eq!(svc.list().await.unwrap().len(), 1);
-        assert_eq!(svc.get(&name).await.unwrap(), added);
-
-        let first = svc
-            .deliver(
-                &name,
-                Uuid::now_v7(),
-                "alice".to_string(),
-                "ping".to_string(),
-                None,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        let sid = match first {
-            DeliveryOutcome::Replied { body, session_id } => {
-                assert_eq!(body, "first answer");
-                session_id.unwrap()
-            }
-            other => panic!("unexpected outcome: {other:?}"),
-        };
-        assert_eq!(sid, "019a20e4-80cc-7754-b584-33393adcc1f5");
-
-        let second = svc
-            .deliver(
-                &name,
-                Uuid::now_v7(),
-                "alice".to_string(),
-                "follow-up".to_string(),
-                Some(sid.clone()),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            second,
-            DeliveryOutcome::Replied {
-                body: "second answer".to_string(),
-                session_id: Some(sid),
-            }
-        );
-
-        // Unbound extension refuses to create a new session.
-        let unbound = ExtensionName::new("unbound").unwrap();
-        svc.add(
-            unbound.clone(),
-            PathBuf::from("/tmp/workspace-b"),
-            "Unbound".to_string(),
-            HarnessKind::Codex,
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            svc.deliver(
-                &unbound,
-                Uuid::now_v7(),
-                "alice".to_string(),
-                "ping".to_string(),
-                None,
-                CancellationToken::new(),
-            )
-            .await,
-            Err(ExtensionError::SessionRequired(_))
-        ));
-
-        // Direct arbitrary pre-existing session UUID works without registration.
-        let direct_uuid = ExtensionName::new("01a20e4a-a5b2-77e0-bd3f-2e46d42b8ebd").unwrap();
-        let direct = svc
-            .deliver(
-                &direct_uuid,
-                Uuid::now_v7(),
-                "alice".to_string(),
-                "direct ping".to_string(),
-                None,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            direct,
-            DeliveryOutcome::Replied { session_id: Some(ref s), .. }
-                if s == "01a20e4a-a5b2-77e0-bd3f-2e46d42b8ebd"
-        ));
-
-        assert!(svc.remove(&name).await.unwrap());
-        assert!(!svc.remove(&name).await.unwrap());
-        assert!(matches!(
-            svc.get(&name).await,
-            Err(ExtensionError::NotFound(_))
-        ));
+    if query.len() >= 8 {
+        let prefix: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.id.to_ascii_lowercase().starts_with(&q_lower))
+            .collect();
+        if prefix.len() == 1 {
+            return Ok(prefix[0]);
+        }
+        if prefix.len() > 1 {
+            return Err(ExtensionError::AmbiguousSession(
+                query.to_string(),
+                prefix.len(),
+            ));
+        }
     }
+
+    Err(ExtensionError::SessionNotFound(query.to_string()))
 }
+
+#[cfg(test)]
+#[path = "extensions_tests.rs"]
+mod tests;

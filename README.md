@@ -47,11 +47,11 @@ Switchboard is a single Rust crate organized into **vertical domain slices under
    switchboard ring
    switchboard approve alice
    ```
-5. Message a bound extension or any arbitrary pre-existing Codex session:
+5. Message any pre-existing session directly (`<peer>.<harness>.<conversation-name-or-id>`):
    ```bash
-   switchboard ext sessions
-   switchboard call bob/api "What exact payload does POST /v2/orders expect?" --json
-   switchboard call bob/<session_uuid> "Quick status check?" --json
+   switchboard sessions
+   switchboard call bob.codex.01a1f360-26fc-7273-af47-5bf87a88c890 "What payload does POST /v2/orders expect?" --json
+   switchboard call bob.codex.codex://threads/01a1f360-26fc-7273-af47-5bf87a88c890 "Quick check?" --json
    switchboard reply <call_id> "Does that also apply for EUR?" --done --json
    ```
 

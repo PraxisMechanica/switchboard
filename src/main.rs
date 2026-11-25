@@ -80,8 +80,19 @@ enum Command {
     /// Revoke an existing peer relationship locally.
     Revoke(PeerTargetArgs),
 
-    /// Place an agent-to-agent call to `<peer>/<extension>`.
+    /// Place an agent-to-agent call to `<peer>.<harness>.<conversation-name-or-id>`.
     Call(CallArgs),
+
+    /// List local pre-existing Codex sessions formatted as callable Switchboard addresses.
+    Sessions {
+        /// Maximum number of recent sessions to display.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Output machine-readable JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 
     /// Send a follow-up turn on an existing call.
     Reply(ReplyArgs),
@@ -122,6 +133,7 @@ async fn main() -> Result<()> {
         Command::Approve(args) => cmd_ipc_approve(&cfg, args).await,
         Command::Reject(args) => cmd_ipc_reject(&cfg, args).await,
         Command::Call(args) => cmd_ipc_call(&cfg, args).await,
+        Command::Sessions { limit, json } => cmd_sessions(&cfg, db, limit, json).await,
         Command::Reply(args) => cmd_ipc_reply(&cfg, args).await,
         Command::History(args) => cmd_history(db, args).await,
         Command::Service { cmd } => {
@@ -266,6 +278,44 @@ async fn run_directory_cmd<D: DirectoryPort>(
 
 async fn cmd_ext(cfg: &SwitchboardConfig, db: Database, cmd: ExtCmd) -> Result<()> {
     run_ext_cmd(cfg.codex_config(), db, cmd).await?;
+    Ok(())
+}
+
+async fn cmd_sessions(
+    cfg: &SwitchboardConfig,
+    db: Database,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    let handle = IdentityService::new(db, SystemClock)
+        .load_required()
+        .await
+        .map(|id| id.handle)
+        .unwrap_or_else(|_| "<you>".to_string());
+    let sessions = CodexHarness::new(cfg.codex_config())
+        .list_sessions(limit)
+        .await?;
+    if json {
+        let enriched: Vec<_> = sessions
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "address": format!("{handle}.codex.{}", s.id),
+                    "id": s.id,
+                    "cwd": s.cwd,
+                    "title": s.title,
+                    "updated_at": s.updated_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&enriched)?);
+    } else if sessions.is_empty() {
+        println!("No pre-existing Codex sessions found.");
+    } else {
+        for s in sessions {
+            println!("{handle}.codex.{}  {}", s.id, s.title);
+        }
+    }
     Ok(())
 }
 

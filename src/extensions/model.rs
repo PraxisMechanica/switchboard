@@ -39,29 +39,61 @@ pub fn resolve_codex_binary(configured: &Path) -> PathBuf {
     configured.to_path_buf()
 }
 
-/// Validated extension identifier matching `[a-z0-9_-]{1,48}`.
+/// Validated target address (`<harness>.<conversation>` or legacy extension name).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExtensionName(String);
 
 impl ExtensionName {
-    /// Constructs a validated extension name.
+    /// Constructs a validated extension or `<harness>.<conversation>` target address.
     pub fn new(raw: &str) -> Result<Self, ExtensionError> {
-        if raw.is_empty()
-            || raw.len() > 48
-            || !raw
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > 160
+            || trimmed != raw
+            || trimmed.chars().any(char::is_control)
         {
             return Err(ExtensionError::InvalidName(raw.to_string()));
         }
-        Ok(Self(raw.to_string()))
+        Ok(Self(trimmed.to_string()))
+    }
+
+    /// Parses `<harness>.<conversation-name-or-id>` into `(HarnessKind, &str)` when dotted.
+    pub fn parse_harness_target(&self) -> Result<Option<(HarnessKind, &str)>, ExtensionError> {
+        let Some((harness_raw, conversation)) = self.0.split_once('.') else {
+            return Ok(None);
+        };
+        let conv = conversation.trim();
+        if conv.is_empty() {
+            return Err(ExtensionError::InvalidName(self.0.clone()));
+        }
+        let harness = HarnessKind::from_str(harness_raw)?;
+        Ok(Some((harness, conv)))
     }
 
     /// Returns the underlying validated string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Normalizes a human conversation title into a lowercase hyphenated slug for flexible lookup.
+pub fn slugify_title(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_dash = true;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 impl fmt::Display for ExtensionName {

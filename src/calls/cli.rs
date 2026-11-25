@@ -2,10 +2,10 @@
 
 use clap::Args;
 
-/// Arguments for `switchboard call <peer>/<extension> <message>`.
+/// Arguments for `switchboard call <peer>.<harness>.<conversation-name-or-id> <message>`.
 #[derive(Debug, Args)]
 pub struct CallArgs {
-    /// Target in `<peer_handle>/<extension>` format (for example `bob/api`).
+    /// Target in `<peer>.<harness>.<conversation-name-or-id>` format (e.g. `dante.codex.<uuid>`).
     pub target: String,
 
     /// Message payload delivered to the remote agent.

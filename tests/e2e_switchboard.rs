@@ -275,10 +275,11 @@ async fn full_iroh_git_phonebook_human_approval_and_codex_multi_turn_e2e() {
     );
     assert_eq!(bob_msgs.len(), 2);
 
-    // 8. Alice can also message an arbitrary pre-existing Codex session directly by UUID.
+    // 8. Alice can message an arbitrary pre-existing Codex session directly via
+    //    `<peer>.<harness>.<uuid>` and `<peer>.<harness>.codex://threads/<uuid>` with zero registration.
     let direct = alice
         .call_extension(
-            &format!("bob/{PRE_EXISTING_ARBITRARY_THREAD}"),
+            &format!("bob.codex.{PRE_EXISTING_ARBITRARY_THREAD}"),
             "Status check on arbitrary existing session".to_string(),
             None,
             Duration::from_secs(15),
@@ -287,6 +288,18 @@ async fn full_iroh_git_phonebook_human_approval_and_codex_multi_turn_e2e() {
         .unwrap();
     assert_eq!(direct.status, CallResponseStatus::Replied);
     assert!(direct.body.contains(PRE_EXISTING_ARBITRARY_THREAD));
+
+    let direct_uri = alice
+        .call_extension(
+            &format!("bob.codex.codex://threads/{PRE_EXISTING_ARBITRARY_THREAD}"),
+            "URI form check".to_string(),
+            None,
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
+    assert_eq!(direct_uri.status, CallResponseStatus::Replied);
+    assert!(direct_uri.body.contains(PRE_EXISTING_ARBITRARY_THREAD));
 
     let (alice_call, alice_msgs) = alice.calls.history(turn1.call_id).await.unwrap();
     assert_eq!(alice_call.status, CallStatus::Closed);

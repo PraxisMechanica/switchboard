@@ -362,14 +362,28 @@ where
                 call_id: req.call_id,
                 message_id: req.message_id,
                 status: CallResponseStatus::ExtensionNotFound,
-                body: format!("extension '{name}' not registered"),
+                body: format!("target '{name}' not found"),
+            },
+            Err(ExtensionError::SessionNotFound(query)) => CallResponse {
+                call_id: req.call_id,
+                message_id: req.message_id,
+                status: CallResponseStatus::ExtensionNotFound,
+                body: format!("no pre-existing agent session found matching '{query}'"),
+            },
+            Err(ExtensionError::AmbiguousSession(query, count)) => CallResponse {
+                call_id: req.call_id,
+                message_id: req.message_id,
+                status: CallResponseStatus::HarnessFailed,
+                body: format!(
+                    "multiple pre-existing agent sessions ({count}) match '{query}'; specify the session UUID"
+                ),
             },
             Err(ExtensionError::SessionRequired(name)) => CallResponse {
                 call_id: req.call_id,
                 message_id: req.message_id,
                 status: CallResponseStatus::HarnessFailed,
                 body: format!(
-                    "extension '{name}' has no pre-existing session bound; bind one with `switchboard ext bind` or call <peer>/<session_id> directly"
+                    "extension '{name}' has no pre-existing session bound; call <peer>.<harness>.<conversation-name-or-id> directly"
                 ),
             },
             Err(err) => return Err(CallError::Extension(err)),

@@ -185,6 +185,10 @@ impl AgentHarness for CodexHarness {
         // 5. Stream turn events until turn/completed, cancel, timeout, or EOF
         session.stream_turn(thread_id, deadline, &cancel).await
     }
+
+    async fn list_sessions(&self, limit: usize) -> Result<Vec<CodexSessionInfo>, ExtensionError> {
+        list_codex_sessions(&self.config, limit).await
+    }
 }
 
 pub(crate) enum RpcStep {

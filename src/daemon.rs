@@ -54,7 +54,7 @@ pub enum NodeError {
     #[error("transport error: {0}")]
     Transport(#[from] TransportError),
 
-    #[error("invalid call target '{0}': expected '<peer_handle>/<extension>'")]
+    #[error("invalid call target '{0}': expected '<peer>.<harness>.<conversation-name-or-id>'")]
     InvalidTarget(String),
 
     #[error("unknown peer '{0}': sync the directory or supply a hex peer id")]
@@ -208,7 +208,8 @@ where
         Ok(peer)
     }
 
-    /// Places a call to `<peer_handle>/<extension>` after verifying the peer is approved.
+    /// Places a call to `<peer>.<harness>.<conversation-name-or-id>` (or legacy `<peer>/<ext>`)
+    /// after verifying the peer is approved.
     pub async fn call_extension(
         &self,
         target: &str,
@@ -216,8 +217,7 @@ where
         endpoint_override: Option<PeerEndpoint>,
         timeout: Duration,
     ) -> Result<CallResponse, NodeError> {
-        let (peer_handle, ext_raw) = target
-            .split_once('/')
+        let (peer_handle, ext_raw) = parse_call_target(target)
             .ok_or_else(|| NodeError::InvalidTarget(target.to_string()))?;
         let ext = ExtensionName::new(ext_raw)?;
         let local = self.identity.load_required().await?;
@@ -434,6 +434,22 @@ fn endpoint_from_card(card: &PeerCard) -> PeerEndpoint {
         direct_addrs,
         relay_url: None,
     }
+}
+
+/// Parses `<user-or-machine>.<harness>.<conversation-name-or-id>` (including `codex://threads/...`)
+/// or legacy `<peer>/<extension>` into `(peer_handle, target_suffix)`.
+pub fn parse_call_target(target: &str) -> Option<(&str, &str)> {
+    let trimmed = target.trim();
+    if let Some((peer, rest)) = trimmed.split_once('.') {
+        if !peer.is_empty() && !peer.contains('/') && rest.contains('.') {
+            return Some((peer, rest));
+        }
+    }
+    let (peer, ext) = trimmed.split_once('/')?;
+    if peer.is_empty() || ext.is_empty() {
+        return None;
+    }
+    Some((peer, ext))
 }
 
 fn error_frame(message: &str) -> WireFrame {
