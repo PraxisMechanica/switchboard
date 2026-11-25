@@ -134,6 +134,7 @@ fn make_req(dir: &Path, body: &str, session_id: &str) -> DeliveryRequest {
     DeliveryRequest {
         call_id: Uuid::now_v7(),
         extension: ExtensionName::new("codex.backend").unwrap(),
+        harness: HarnessKind::Codex,
         workspace_dir: dir.to_path_buf(),
         from_handle: "alice".to_string(),
         body: body.to_string(),

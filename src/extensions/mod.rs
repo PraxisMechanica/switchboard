@@ -1,5 +1,6 @@
 //! Extensions vertical slice: callable local workspaces, `AgentHarness` port, and Codex adapter.
 
+pub mod agy;
 pub mod cli;
 pub mod codex;
 pub mod codex_policy;
@@ -18,6 +19,7 @@ use uuid::Uuid;
 use crate::db::{Database, DbError};
 use crate::primitives::Clock;
 
+pub use agy::{AgyConfig, AgyHarness, MultiHarness};
 pub use cli::{run_ext_cmd, ExtCmd};
 pub use codex::{CodexConfig, CodexHarness};
 pub use conformance::{verify_harness, StubHarness};
@@ -191,25 +193,36 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
         let fallback_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         // Primary path: `<harness>.<conversation-name-or-id>` (zero registration required).
-        let (name, workspace_dir, session_id) =
-            if let Some((_harness, raw_conv)) = ext_name.parse_harness_target()? {
+        let (name, harness, workspace_dir, session_id) =
+            if let Some((harness, raw_conv)) = ext_name.parse_harness_target()? {
                 let conversation = raw_conv
                     .strip_prefix("codex://threads/")
                     .unwrap_or(raw_conv)
                     .trim();
                 if let Some(sid) = existing_session_id {
-                    (ext_name.clone(), fallback_dir, sid)
+                    (ext_name.clone(), harness, fallback_dir, sid)
                 } else if Uuid::parse_str(conversation).is_ok() {
-                    (ext_name.clone(), fallback_dir, conversation.to_string())
+                    (
+                        ext_name.clone(),
+                        harness,
+                        fallback_dir,
+                        conversation.to_string(),
+                    )
                 } else {
-                    let sessions = self.harness.list_sessions(200).await?;
+                    let sessions: Vec<_> = self
+                        .harness
+                        .list_sessions(200)
+                        .await?
+                        .into_iter()
+                        .filter(|s| s.harness == harness)
+                        .collect();
                     let matched = resolve_session_by_name_or_prefix(&sessions, conversation)?;
                     let dir = if matched.cwd.is_empty() {
                         fallback_dir
                     } else {
                         PathBuf::from(&matched.cwd)
                     };
-                    (ext_name.clone(), dir, matched.id.clone())
+                    (ext_name.clone(), harness, dir, matched.id.clone())
                 }
             } else {
                 match self.repo.get(ext_name).await? {
@@ -217,7 +230,7 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
                         let sid = existing_session_id
                             .or(ext.session_id)
                             .ok_or_else(|| ExtensionError::SessionRequired(ext.name.to_string()))?;
-                        (ext.name, ext.workspace_dir, sid)
+                        (ext.name, ext.harness, ext.workspace_dir, sid)
                     }
                     None => {
                         let sid = existing_session_id
@@ -227,7 +240,7 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
                                     .map(|_| ext_name.to_string())
                             })
                             .ok_or_else(|| ExtensionError::NotFound(ext_name.to_string()))?;
-                        (ext_name.clone(), fallback_dir, sid)
+                        (ext_name.clone(), HarnessKind::Codex, fallback_dir, sid)
                     }
                 }
             };
@@ -235,6 +248,7 @@ impl<H: AgentHarness, C: Clock> ExtensionsService<H, C> {
         let req = DeliveryRequest {
             call_id,
             extension: name,
+            harness,
             workspace_dir,
             from_handle,
             body,

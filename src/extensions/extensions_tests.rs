@@ -60,7 +60,13 @@ fn target_address_validation_and_dotted_parsing() {
 #[test]
 fn harness_kind_roundtrips() {
     assert_eq!(HarnessKind::Codex.to_string(), "codex");
+    assert_eq!(HarnessKind::Agy.to_string(), "agy");
     assert_eq!(HarnessKind::from_str("codex").unwrap(), HarnessKind::Codex);
+    assert_eq!(HarnessKind::from_str("agy").unwrap(), HarnessKind::Agy);
+    assert_eq!(
+        HarnessKind::from_str("antigravity").unwrap(),
+        HarnessKind::Agy
+    );
     assert!(matches!(
         HarnessKind::from_str("unknown"),
         Err(ExtensionError::UnsupportedHarness(_))
@@ -74,6 +80,7 @@ async fn delivers_to_dotted_uuid_uri_and_named_sessions_without_registration() {
 
     let harness = StubHarness::new().with_sessions(vec![CodexSessionInfo {
         id: "01a20d93-57ce-7150-8daf-77cf1172377e".to_string(),
+        harness: HarnessKind::Codex,
         cwd: "/tmp/euclid".to_string(),
         title: "Verify Euclid cluster access".to_string(),
         updated_at: None,

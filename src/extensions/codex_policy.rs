@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::model::{CodexSessionInfo, DeliveryRequest};
+use super::model::{CodexSessionInfo, DeliveryRequest, HarnessKind};
 
 /// System instructions injected on every Switchboard Codex turn to keep calls message-only.
 pub const TEXT_ONLY_DEVELOPER_INSTRUCTIONS: &str = "You are receiving an agent-to-agent text message delivered via Switchboard. Reply in plain text only. Do not run shell commands, edit files, open browsers, or invoke external tools or MCP servers.";
@@ -246,6 +246,7 @@ pub(crate) fn extract_thread_list(msg: &Value) -> Vec<CodexSessionInfo> {
                 .or_else(|| item.get("createdAt").and_then(Value::as_i64));
             Some(CodexSessionInfo {
                 id,
+                harness: HarnessKind::Codex,
                 cwd,
                 title,
                 updated_at,

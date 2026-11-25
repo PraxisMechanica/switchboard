@@ -111,10 +111,12 @@ impl FromStr for ExtensionName {
 }
 
 /// Supported local agent harness implementations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HarnessKind {
+    #[default]
     Codex,
+    Agy,
 }
 
 impl HarnessKind {
@@ -122,6 +124,7 @@ impl HarnessKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
+            Self::Agy => "agy",
         }
     }
 }
@@ -138,6 +141,7 @@ impl FromStr for HarnessKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "codex" => Ok(Self::Codex),
+            "agy" | "antigravity" => Ok(Self::Agy),
             _ => Err(ExtensionError::UnsupportedHarness(s.to_string())),
         }
     }
@@ -155,10 +159,12 @@ pub struct Extension {
     pub created_at: Timestamp,
 }
 
-/// Summary of an existing Codex session discovered via `thread/list`.
+/// Summary of a pre-existing local agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexSessionInfo {
     pub id: String,
+    #[serde(default)]
+    pub harness: HarnessKind,
     pub cwd: String,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,6 +177,7 @@ pub struct CodexSessionInfo {
 pub struct DeliveryRequest {
     pub call_id: Uuid,
     pub extension: ExtensionName,
+    pub harness: HarnessKind,
     pub workspace_dir: PathBuf,
     pub from_handle: String,
     pub body: String,

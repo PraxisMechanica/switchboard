@@ -15,7 +15,9 @@ use switchboard::directory::{
     AdvertisedExtension, DirectoryCmd, DirectoryPort, DirectoryService, GitPhonebook,
     MemoryDirectory, PeerCard,
 };
-use switchboard::extensions::{run_ext_cmd, CodexHarness, ExtCmd, ExtensionsService};
+use switchboard::extensions::{
+    run_ext_cmd, AgentHarness, AgyHarness, CodexHarness, ExtCmd, ExtensionsService, MultiHarness,
+};
 use switchboard::identity::cli::{InitArgs, WhoamiArgs};
 use switchboard::identity::IdentityService;
 use switchboard::ipc::{self, IpcRequest, IpcResponse};
@@ -292,7 +294,7 @@ async fn cmd_sessions(
         .await
         .map(|id| id.handle)
         .unwrap_or_else(|_| "<you>".to_string());
-    let sessions = CodexHarness::new(cfg.codex_config())
+    let sessions = MultiHarness::new(CodexHarness::new(cfg.codex_config()), AgyHarness::default())
         .list_sessions(limit)
         .await?;
     if json {
@@ -300,7 +302,8 @@ async fn cmd_sessions(
             .into_iter()
             .map(|s| {
                 serde_json::json!({
-                    "address": format!("{handle}.codex.{}", s.id),
+                    "address": format!("{handle}.{}.{}", s.harness, s.id),
+                    "harness": s.harness,
                     "id": s.id,
                     "cwd": s.cwd,
                     "title": s.title,
@@ -310,10 +313,10 @@ async fn cmd_sessions(
             .collect();
         println!("{}", serde_json::to_string_pretty(&enriched)?);
     } else if sessions.is_empty() {
-        println!("No pre-existing Codex sessions found.");
+        println!("No pre-existing agent sessions found.");
     } else {
         for s in sessions {
-            println!("{handle}.codex.{}  {}", s.id, s.title);
+            println!("{handle}.{}.{}  {}", s.harness, s.id, s.title);
         }
     }
     Ok(())

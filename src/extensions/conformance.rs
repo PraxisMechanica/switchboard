@@ -8,7 +8,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::model::{CodexSessionInfo, DeliveryOutcome, DeliveryRequest, ExtensionName};
+use super::model::{
+    CodexSessionInfo, DeliveryOutcome, DeliveryRequest, ExtensionName, HarnessKind,
+};
 use super::{AgentHarness, ExtensionError};
 
 /// Prompt marker used by [`verify_harness`] to exercise mid-turn cancellation.
@@ -169,6 +171,7 @@ pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
             DeliveryRequest {
                 call_id: Uuid::now_v7(),
                 extension: ext.clone(),
+                harness: HarnessKind::Codex,
                 workspace_dir: workspace.to_path_buf(),
                 from_handle: "alice".to_string(),
                 body: "hello from conformance test".to_string(),
@@ -198,6 +201,7 @@ pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
             DeliveryRequest {
                 call_id: Uuid::now_v7(),
                 extension: ext.clone(),
+                harness: HarnessKind::Codex,
                 workspace_dir: workspace.to_path_buf(),
                 from_handle: "alice".to_string(),
                 body: "follow-up turn".to_string(),
@@ -239,6 +243,7 @@ pub async fn verify_harness<H: AgentHarness>(harness: &H, workspace: &Path) {
             DeliveryRequest {
                 call_id: Uuid::now_v7(),
                 extension: ext,
+                harness: HarnessKind::Codex,
                 workspace_dir: workspace.to_path_buf(),
                 from_handle: "alice".to_string(),
                 body: format!("{CONFORMANCE_SLOW_MARKER}: hold turn for cancellation"),

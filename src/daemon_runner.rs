@@ -12,7 +12,7 @@ use switchboard::db::Database;
 use switchboard::directory::{
     DirectoryError, DirectoryPort, GitPhonebook, MemoryDirectory, PeerCard,
 };
-use switchboard::extensions::CodexHarness;
+use switchboard::extensions::{AgyHarness, CodexHarness, MultiHarness};
 use switchboard::identity::{IdentityService, LocalKeypair, PeerId, Signed};
 use switchboard::ipc::{self, IpcRequest, IpcResponse};
 use switchboard::peers::TracingNotifier;
@@ -25,7 +25,7 @@ use switchboard::transport::{
 type ProductionNode = SwitchboardNode<
     RuntimeTransport,
     DaemonDirectory,
-    CodexHarness,
+    MultiHarness,
     SystemClock,
     UuidV7Gen,
     TracingNotifier,
@@ -49,7 +49,7 @@ pub async fn run_daemon(cfg: SwitchboardConfig, db: Database) -> Result<()> {
         db,
         transport,
         dir_port,
-        CodexHarness::new(cfg.codex_config()),
+        MultiHarness::new(CodexHarness::new(cfg.codex_config()), AgyHarness::default()),
         SystemClock,
         UuidV7Gen,
         TracingNotifier,

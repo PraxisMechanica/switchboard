@@ -57,9 +57,13 @@ if [ "${OS}" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
 fi
 
 if [ -f "${TMPDIR}/SKILL.md" ]; then
-  SKILL_DIR="$HOME/.codex/skills/switchboard-calling"
-  mkdir -p "${SKILL_DIR}"
-  cp "${TMPDIR}/SKILL.md" "${SKILL_DIR}/SKILL.md"
+  for SKILL_DIR in \
+    "$HOME/.codex/skills/switchboard-calling" \
+    "$HOME/.gemini/antigravity/skills/switchboard-calling"
+  do
+    mkdir -p "${SKILL_DIR}"
+    cp "${TMPDIR}/SKILL.md" "${SKILL_DIR}/SKILL.md"
+  done
 fi
 
 echo "Installed switchboard ${VERSION} to ${INSTALL_DIR}/switchboard"

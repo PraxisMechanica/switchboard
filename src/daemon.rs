@@ -15,7 +15,8 @@ use crate::directory::{
 use crate::extensions::{AgentHarness, ExtensionError, ExtensionName, ExtensionsService};
 use crate::identity::{self, IdentityError, IdentityService, PeerId, Signed};
 use crate::peers::{
-    ApprovalNotifier, Knock, KnockDecision, Peer, PeerEffect, PeerError, PeerHandle, PeersService,
+    ApprovalNotifier, Knock, KnockDecision, Peer, PeerEffect, PeerError, PeerHandle, PeerStatus,
+    PeersService,
 };
 use crate::primitives::{Clock, IdGen};
 use crate::transport::{
@@ -165,6 +166,7 @@ where
             .record_outbound_knock(peer_id, handle, reason.clone())
             .await?;
 
+        let mut peer = peer;
         for effect in effects {
             if let PeerEffect::DispatchKnock { reason, .. } = effect {
                 let signed = identity::sign(
@@ -176,20 +178,54 @@ where
                     },
                 );
                 let frame = WireFrame::new(FrameKind::Knock, serde_json::to_value(&signed)?);
-                let _ = self.transport.request(&endpoint, frame, timeout).await?;
+                let resp = self.transport.request(&endpoint, frame, timeout).await?;
+                if resp.kind == FrameKind::KnockDecision {
+                    if let Ok(signed_dec) =
+                        serde_json::from_value::<Signed<KnockDecision>>(resp.payload)
+                    {
+                        if let Ok(verified_dec) = identity::verify(signed_dec) {
+                            if verified_dec.signer() == peer_id {
+                                peer = self.peers.handle_remote_decision(verified_dec).await?;
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(peer)
     }
 
-    /// Approves an inbound knock and dispatches a signed approval decision to the remote peer.
+    /// Approves an inbound knock (or re-dispatches an existing approval) to the remote peer.
     pub async fn approve_peer(
         &self,
         handle: &str,
         endpoint_override: Option<PeerEndpoint>,
         timeout: Duration,
     ) -> Result<Peer, NodeError> {
-        let (peer, effects) = self.peers.approve_by_handle(handle).await?;
+        let (peer, effects) = match self.peers.approve_by_handle(handle).await {
+            Ok(pair) => pair,
+            Err(PeerError::InvalidTransition {
+                current: "approved",
+                ..
+            }) => {
+                let approved = self.peers.resolve_approved_by_handle(handle).await?;
+                let peer = self
+                    .peers
+                    .list_all()
+                    .await?
+                    .into_iter()
+                    .find(|p| p.peer_id == approved.peer_id())
+                    .ok_or_else(|| PeerError::NotFound(handle.to_string()))?;
+                (
+                    peer,
+                    vec![PeerEffect::DispatchDecision {
+                        peer_id: approved.peer_id(),
+                        approved: true,
+                    }],
+                )
+            }
+            Err(e) => return Err(NodeError::Peer(e)),
+        };
         self.dispatch_decision_effects(peer.peer_id, effects, endpoint_override, timeout)
             .await?;
         Ok(peer)
@@ -341,6 +377,21 @@ where
             Err(e) => return error_frame(&format!("knock verification failed: {e}")),
         };
         match self.peers.handle_inbound_knock(verified).await {
+            Ok((peer, _)) if peer.status == PeerStatus::Approved => {
+                let Ok(local) = self.identity.load_required().await else {
+                    return error_frame("local identity unavailable");
+                };
+                let dec = identity::sign(
+                    &local.keypair,
+                    KnockDecision {
+                        approved: true,
+                        decided_at: self.clock.now(),
+                    },
+                );
+                serde_json::to_value(&dec)
+                    .map(|val| WireFrame::new(FrameKind::KnockDecision, val))
+                    .unwrap_or_else(|e| error_frame(&e.to_string()))
+            }
             Ok(_) => WireFrame::new(FrameKind::KnockDecision, serde_json::json!({ "ack": true })),
             Err(e) => error_frame(&e.to_string()),
         }
