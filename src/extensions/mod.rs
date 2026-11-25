@@ -1,6 +1,7 @@
 //! Extensions vertical slice: callable local workspaces, `AgentHarness` port, and Codex adapter.
 
 pub mod agy;
+pub mod agy_bridge;
 pub mod cli;
 pub mod codex;
 pub mod codex_policy;

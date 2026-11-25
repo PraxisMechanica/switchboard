@@ -24,7 +24,7 @@ fn discovers_uuid_db_files_in_agy_conversations_dir() {
     )
     .unwrap();
 
-    let found = discover_agy_brain_sessions(dir.path(), 10);
+    let found = discover_agy_brain_sessions(dir.path(), 10, "Antigravity App conversation");
     assert_eq!(found.len(), 2);
     assert!(found.iter().all(|s| s.harness == HarnessKind::Agy));
     assert!(found

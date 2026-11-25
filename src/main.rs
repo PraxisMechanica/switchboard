@@ -114,6 +114,16 @@ enum Command {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+
+    /// Run or install the Antigravity App sidecar bridge (`agentapi send-message`).
+    AgyBridge {
+        /// Install and enable the sidecar manifest under ~/.gemini/config/.
+        #[arg(long, default_value_t = false)]
+        install: bool,
+        /// Optional Unix socket path override.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -151,6 +161,10 @@ async fn main() -> Result<()> {
         }
         Command::Update { force } => {
             run_update_cmd(&cfg.update, &cfg.data_dir, force).await?;
+            Ok(())
+        }
+        Command::AgyBridge { install, socket } => {
+            switchboard::extensions::agy_bridge::run_agy_bridge_cmd(install, socket).await?;
             Ok(())
         }
     }

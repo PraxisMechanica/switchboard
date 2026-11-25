@@ -9,6 +9,10 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::agy_bridge::{
+    default_agy_app_brain_root, default_agy_app_conversations_dir, default_agy_bridge_socket,
+    deliver_via_app_bridge, is_app_conversation,
+};
 use super::codex::CodexHarness;
 use super::model::{CodexSessionInfo, DeliveryOutcome, DeliveryRequest, HarnessKind};
 use super::{AgentHarness, ExtensionError};
@@ -80,8 +84,25 @@ impl AgentHarness for AgyHarness {
             return Err(ExtensionError::SessionRequired(req.extension.to_string()));
         }
 
-        let binary = resolve_agy_binary(&self.config.binary);
         let prompt = format_agy_prompt(&req);
+        if let Some(app_convs) = default_agy_app_conversations_dir() {
+            if is_app_conversation(&app_convs, &req.session_id) {
+                let brain_root = default_agy_app_brain_root().ok_or_else(|| {
+                    ExtensionError::Protocol("HOME is not set for Antigravity App brain".into())
+                })?;
+                return deliver_via_app_bridge(
+                    &default_agy_bridge_socket(),
+                    &brain_root,
+                    &req,
+                    &prompt,
+                    self.config.turn_timeout,
+                    cancel,
+                )
+                .await;
+            }
+        }
+
+        let binary = resolve_agy_binary(&self.config.binary);
         let timeout_arg = format!("{}s", self.config.turn_timeout.as_secs().max(1));
 
         let child = Command::new(&binary)
@@ -136,11 +157,34 @@ impl AgentHarness for AgyHarness {
     }
 
     async fn list_sessions(&self, limit: usize) -> Result<Vec<CodexSessionInfo>, ExtensionError> {
-        let brain = self.config.brain_dir.clone().or_else(default_agy_brain_dir);
-        let Some(dir) = brain else {
-            return Ok(Vec::new());
-        };
-        Ok(discover_agy_brain_sessions(&dir, limit))
+        let mut sessions = Vec::new();
+        if let Some(dir) = self.config.brain_dir.clone() {
+            sessions.extend(discover_agy_brain_sessions(
+                &dir,
+                limit,
+                "Antigravity CLI conversation",
+            ));
+        } else {
+            if let Some(app_dir) = default_agy_app_conversations_dir() {
+                sessions.extend(discover_agy_brain_sessions(
+                    &app_dir,
+                    limit,
+                    "Antigravity App conversation",
+                ));
+            }
+            if let Some(cli_dir) = default_agy_brain_dir() {
+                sessions.extend(discover_agy_brain_sessions(
+                    &cli_dir,
+                    limit,
+                    "Antigravity CLI conversation",
+                ));
+            }
+        }
+        sessions.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
+        let mut seen = std::collections::HashSet::new();
+        sessions.retain(|s| seen.insert(s.id.clone()));
+        sessions.truncate(limit);
+        Ok(sessions)
     }
 }
 
@@ -217,6 +261,7 @@ pub(crate) fn parse_agy_json_reply(stdout: &str) -> String {
 pub(crate) fn discover_agy_brain_sessions(
     conversations_dir: &Path,
     limit: usize,
+    label: &str,
 ) -> Vec<CodexSessionInfo> {
     let Ok(entries) = std::fs::read_dir(conversations_dir) else {
         return Vec::new();
@@ -242,7 +287,7 @@ pub(crate) fn discover_agy_brain_sessions(
             id: stem.to_string(),
             harness: HarnessKind::Agy,
             cwd: String::new(),
-            title: "Antigravity CLI conversation".to_string(),
+            title: label.to_string(),
             updated_at,
         });
     }
