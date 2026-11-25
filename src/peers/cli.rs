@@ -2,13 +2,13 @@
 
 use clap::Args;
 
-/// Arguments for `switchboard knock`.
+/// Arguments for `switchboard dial`.
 #[derive(Debug, Args)]
-pub struct KnockArgs {
-    /// Target peer ticket, address, or peer ID.
+pub struct DialArgs {
+    /// Target peer handle, address, or peer ID.
     pub target: String,
 
-    /// Human-readable reason for requesting peering.
+    /// Human-readable reason for requesting a direct line.
     #[arg(short = 'm', long)]
     pub reason: String,
 }
@@ -20,7 +20,7 @@ pub struct PeerTargetArgs {
     pub handle: String,
 }
 
-/// Arguments for `switchboard peers`.
+/// Arguments for `switchboard ring` and `switchboard peers`.
 #[derive(Debug, Args)]
 pub struct PeersListArgs {
     /// Output machine-readable JSON.

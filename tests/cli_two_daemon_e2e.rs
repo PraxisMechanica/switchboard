@@ -215,12 +215,12 @@ fn two_real_daemons_complete_full_cli_lifecycle_including_revocation() {
     let pre_approval = run_cli(&alice_cfg, &["call", "bob/api", "hello", "--json"]);
     assert!(!pre_approval.status.success());
 
-    // 6. Alice knocks Bob -> Bob sees pending knock -> Bob approves Alice.
-    run_cli_ok(&alice_cfg, &["knock", "bob", "-m", "API integration"]);
-    let knocks: serde_json::Value =
-        serde_json::from_str(&run_cli_ok(&bob_cfg, &["knocks", "--json"])).unwrap();
-    assert_eq!(knocks.as_array().unwrap().len(), 1);
-    assert_eq!(knocks[0]["handle"], "alice");
+    // 6. Alice dials Bob -> Bob sees ringing line -> Bob approves Alice.
+    run_cli_ok(&alice_cfg, &["dial", "bob", "-m", "API integration"]);
+    let ringing: serde_json::Value =
+        serde_json::from_str(&run_cli_ok(&bob_cfg, &["ring", "--json"])).unwrap();
+    assert_eq!(ringing.as_array().unwrap().len(), 1);
+    assert_eq!(ringing[0]["handle"], "alice");
 
     run_cli_ok(&bob_cfg, &["approve", "alice"]);
 

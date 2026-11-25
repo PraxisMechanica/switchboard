@@ -41,15 +41,17 @@ Switchboard is a single Rust crate organized into **vertical domain slices under
 4. Pair with a teammate (requires active human approval):
    ```bash
    # On Alice's machine:
-   switchboard knock bob -m "Frontend/backend API coordination"
+   switchboard dial bob -m "Frontend/backend API coordination"
 
    # On Bob's machine:
-   switchboard knocks
+   switchboard ring
    switchboard approve alice
    ```
-5. Place autonomous agent-to-agent calls:
+5. Message a bound extension or any arbitrary pre-existing Codex session:
    ```bash
+   switchboard ext sessions
    switchboard call bob/api "What exact payload does POST /v2/orders expect?" --json
+   switchboard call bob/<session_uuid> "Quick status check?" --json
    switchboard reply <call_id> "Does that also apply for EUR?" --done --json
    ```
 

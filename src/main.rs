@@ -19,7 +19,7 @@ use switchboard::extensions::{run_ext_cmd, CodexHarness, ExtCmd, ExtensionsServi
 use switchboard::identity::cli::{InitArgs, WhoamiArgs};
 use switchboard::identity::IdentityService;
 use switchboard::ipc::{self, IpcRequest, IpcResponse};
-use switchboard::peers::cli::{KnockArgs, PeerTargetArgs, PeersListArgs};
+use switchboard::peers::cli::{DialArgs, PeerTargetArgs, PeersListArgs};
 use switchboard::peers::{PeersService, TracingNotifier};
 use switchboard::primitives::{Clock, SystemClock};
 use switchboard::service::cli::{run_service_cmd, ServiceCmd};
@@ -62,19 +62,19 @@ enum Command {
         cmd: ExtCmd,
     },
 
-    /// Send a signed knock requesting peering approval from a teammate.
-    Knock(KnockArgs),
+    /// Dial a teammate to request an approved direct line.
+    Dial(DialArgs),
 
-    /// List pending inbound knocks awaiting your approval.
-    Knocks(PeersListArgs),
+    /// List ringing lines awaiting your approval.
+    Ring(PeersListArgs),
 
     /// List known peers and their approval statuses.
     Peers(PeersListArgs),
 
-    /// Approve a pending inbound knock from a teammate.
+    /// Approve a pending incoming request from a teammate.
     Approve(PeerTargetArgs),
 
-    /// Reject a pending inbound knock from a teammate.
+    /// Reject a pending incoming request from a teammate.
     Reject(PeerTargetArgs),
 
     /// Revoke an existing peer relationship locally.
@@ -115,10 +115,10 @@ async fn main() -> Result<()> {
         Command::Daemon => daemon_runner::run_daemon(cfg, db).await,
         Command::Directory { cmd } => cmd_directory(&cfg, db, cmd).await,
         Command::Ext { cmd } => cmd_ext(&cfg, db, cmd).await,
-        Command::Knocks(args) => cmd_knocks(db, args).await,
+        Command::Ring(args) => cmd_ring(db, args).await,
         Command::Peers(args) => cmd_peers(db, args).await,
         Command::Revoke(args) => cmd_revoke(db, args).await,
-        Command::Knock(args) => cmd_ipc_knock(&cfg, args).await,
+        Command::Dial(args) => cmd_ipc_dial(&cfg, args).await,
         Command::Approve(args) => cmd_ipc_approve(&cfg, args).await,
         Command::Reject(args) => cmd_ipc_reject(&cfg, args).await,
         Command::Call(args) => cmd_ipc_call(&cfg, args).await,
@@ -269,13 +269,13 @@ async fn cmd_ext(cfg: &SwitchboardConfig, db: Database, cmd: ExtCmd) -> Result<(
     Ok(())
 }
 
-async fn cmd_knocks(db: Database, args: PeersListArgs) -> Result<()> {
+async fn cmd_ring(db: Database, args: PeersListArgs) -> Result<()> {
     let svc = PeersService::new(db, SystemClock, TracingNotifier);
     let pending = svc.list_pending_inbound().await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&pending)?);
     } else if pending.is_empty() {
-        println!("No pending inbound knocks.");
+        println!("No ringing lines awaiting approval.");
     } else {
         for p in pending {
             println!("{:<16} {}  {:?}", p.handle, p.peer_id.short(), p.status);
@@ -304,7 +304,7 @@ async fn cmd_revoke(db: Database, args: PeerTargetArgs) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_ipc_knock(cfg: &SwitchboardConfig, args: KnockArgs) -> Result<()> {
+async fn cmd_ipc_dial(cfg: &SwitchboardConfig, args: DialArgs) -> Result<()> {
     let resp = ipc::send_request(
         &cfg.socket_path(),
         &IpcRequest::Knock {
@@ -316,7 +316,10 @@ async fn cmd_ipc_knock(cfg: &SwitchboardConfig, args: KnockArgs) -> Result<()> {
     .await?;
     match resp {
         IpcResponse::PeerUpdated { peer } => {
-            println!("Knock sent to '{}' ({:?}).", peer.handle, peer.status);
+            println!(
+                "Dial request sent to '{}' ({:?}).",
+                peer.handle, peer.status
+            );
             Ok(())
         }
         IpcResponse::Error { message } => bail!("{message}"),
