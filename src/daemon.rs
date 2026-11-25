@@ -1,5 +1,8 @@
 //! Generic daemon node composing all vertical domains through static traits.
 
+#[path = "daemon_inbound.rs"]
+mod inbound;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,7 +10,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::calls::{CallError, CallId, CallRequest, CallResponse, CallsService, ReplyCallCommand};
+use crate::calls::{CallError, CallId, CallResponse, CallsService, ReplyCallCommand};
 use crate::db::Database;
 use crate::directory::{
     AdvertisedExtension, DirectoryError, DirectoryPort, DirectoryService, PeerCard,
@@ -15,8 +18,7 @@ use crate::directory::{
 use crate::extensions::{AgentHarness, ExtensionError, ExtensionName, ExtensionsService};
 use crate::identity::{self, IdentityError, IdentityService, PeerId, Signed};
 use crate::peers::{
-    ApprovalNotifier, Knock, KnockDecision, Peer, PeerEffect, PeerError, PeerHandle, PeerStatus,
-    PeersService,
+    ApprovalNotifier, Knock, KnockDecision, Peer, PeerEffect, PeerError, PeerHandle, PeersService,
 };
 use crate::primitives::{Clock, IdGen};
 use crate::transport::{
@@ -158,13 +160,33 @@ where
     ) -> Result<Peer, NodeError> {
         let local = self.identity.load_required().await?;
         let (peer_id, handle, endpoint) = self
-            .resolve_target_endpoint(target, endpoint_override)
+            .resolve_target_endpoint(target, endpoint_override.clone())
             .await?;
 
-        let (peer, effects) = self
+        let (peer, effects) = match self
             .peers
-            .record_outbound_knock(peer_id, handle, reason.clone())
-            .await?;
+            .record_outbound_knock(peer_id, handle.clone(), reason.clone())
+            .await
+        {
+            Ok(pair) => pair,
+            Err(PeerError::InvalidTransition {
+                current: "pending_outbound",
+                ..
+            }) => {
+                let existing = self
+                    .peers
+                    .list_all()
+                    .await?
+                    .into_iter()
+                    .find(|p| p.peer_id == peer_id)
+                    .ok_or_else(|| PeerError::NotFound(handle.to_string()))?;
+                (
+                    existing,
+                    vec![PeerEffect::DispatchKnock { peer_id, reason }],
+                )
+            }
+            Err(e) => return Err(NodeError::Peer(e)),
+        };
 
         let mut peer = peer;
         for effect in effects {
@@ -178,7 +200,21 @@ where
                     },
                 );
                 let frame = WireFrame::new(FrameKind::Knock, serde_json::to_value(&signed)?);
-                let resp = self.transport.request(&endpoint, frame, timeout).await?;
+                let resp = match self
+                    .transport
+                    .request(&endpoint, frame.clone(), timeout)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(TransportError::TimedOut | TransportError::Connect(_))
+                        if endpoint_override.is_none() =>
+                    {
+                        let _ = self.directory.sync().await;
+                        let fresh = self.endpoint_for_peer(peer_id, None).await?;
+                        self.transport.request(&fresh, frame, timeout).await?
+                    }
+                    Err(e) => return Err(NodeError::Transport(e)),
+                };
                 if resp.kind == FrameKind::KnockDecision {
                     if let Ok(signed_dec) =
                         serde_json::from_value::<Signed<KnockDecision>>(resp.payload)
@@ -259,12 +295,33 @@ where
         let local = self.identity.load_required().await?;
         let approved = self.peers.resolve_approved_by_handle(peer_handle).await?;
         let endpoint = self
-            .endpoint_for_peer(approved.peer_id(), endpoint_override)
+            .endpoint_for_peer(approved.peer_id(), endpoint_override.clone())
             .await?;
-        Ok(self
+        match self
             .calls
-            .place_call(approved, &endpoint, &local.handle, ext, message, timeout)
-            .await?)
+            .place_call(
+                approved.clone(),
+                &endpoint,
+                &local.handle,
+                ext.clone(),
+                message.clone(),
+                timeout,
+            )
+            .await
+        {
+            Ok(resp) => Ok(resp),
+            Err(CallError::Transport(TransportError::TimedOut | TransportError::Connect(_)))
+                if endpoint_override.is_none() =>
+            {
+                let _ = self.directory.sync().await;
+                let fresh = self.endpoint_for_peer(approved.peer_id(), None).await?;
+                Ok(self
+                    .calls
+                    .place_call(approved, &fresh, &local.handle, ext, message, timeout)
+                    .await?)
+            }
+            Err(e) => Err(NodeError::Call(e)),
+        }
     }
 
     /// Sends a follow-up turn on an existing outbound call.
@@ -366,87 +423,21 @@ where
         Ok(())
     }
 
-    async fn handle_inbound_knock_frame(&self, remote: PeerId, frame: &WireFrame) -> WireFrame {
-        let signed: Signed<Knock> = match serde_json::from_value(frame.payload.clone()) {
-            Ok(v) => v,
-            Err(e) => return error_frame(&format!("invalid knock payload: {e}")),
-        };
-        let verified = match identity::verify(signed) {
-            Ok(v) if v.signer() == remote => v,
-            Ok(_) => return error_frame("knock signer does not match authenticated peer"),
-            Err(e) => return error_frame(&format!("knock verification failed: {e}")),
-        };
-        match self.peers.handle_inbound_knock(verified).await {
-            Ok((peer, _)) if peer.status == PeerStatus::Approved => {
-                let Ok(local) = self.identity.load_required().await else {
-                    return error_frame("local identity unavailable");
-                };
-                let dec = identity::sign(
-                    &local.keypair,
-                    KnockDecision {
-                        approved: true,
-                        decided_at: self.clock.now(),
-                    },
-                );
-                serde_json::to_value(&dec)
-                    .map(|val| WireFrame::new(FrameKind::KnockDecision, val))
-                    .unwrap_or_else(|e| error_frame(&e.to_string()))
-            }
-            Ok(_) => WireFrame::new(FrameKind::KnockDecision, serde_json::json!({ "ack": true })),
-            Err(e) => error_frame(&e.to_string()),
-        }
-    }
-
-    async fn handle_inbound_decision_frame(&self, remote: PeerId, frame: &WireFrame) -> WireFrame {
-        let signed: Signed<KnockDecision> = match serde_json::from_value(frame.payload.clone()) {
-            Ok(v) => v,
-            Err(e) => return error_frame(&format!("invalid decision payload: {e}")),
-        };
-        let verified = match identity::verify(signed) {
-            Ok(v) if v.signer() == remote => v,
-            Ok(_) => return error_frame("decision signer does not match authenticated peer"),
-            Err(e) => return error_frame(&format!("decision verification failed: {e}")),
-        };
-        match self.peers.handle_remote_decision(verified).await {
-            Ok(_) => WireFrame::new(FrameKind::KnockDecision, serde_json::json!({ "ack": true })),
-            Err(e) => error_frame(&e.to_string()),
-        }
-    }
-
-    async fn handle_inbound_call_frame(
-        &self,
-        remote: PeerId,
-        frame: &WireFrame,
-        cancel: CancellationToken,
-    ) -> WireFrame {
-        let caller = match self.peers.authorize(remote).await {
-            Ok(approved) => approved,
-            Err(e) => return error_frame(&e.to_string()),
-        };
-        let req: CallRequest = match serde_json::from_value(frame.payload.clone()) {
-            Ok(r) => r,
-            Err(e) => return error_frame(&format!("invalid call request: {e}")),
-        };
-        match self.calls.handle_inbound_call(caller, req, cancel).await {
-            Ok(resp) => match serde_json::to_value(&resp) {
-                Ok(val) => WireFrame::new(FrameKind::CallResponse, val),
-                Err(e) => error_frame(&format!("response encode error: {e}")),
-            },
-            Err(e) => error_frame(&e.to_string()),
-        }
-    }
-
     async fn resolve_target_endpoint(
         &self,
         target: &str,
         override_ep: Option<PeerEndpoint>,
     ) -> Result<(PeerId, PeerHandle, PeerEndpoint), NodeError> {
-        if let Some(card) = self.directory.resolve_handle(target).await? {
+        let card = match self.directory.resolve_handle(target).await? {
+            Some(c) => Some(c),
+            None => {
+                let _ = self.directory.sync().await;
+                self.directory.resolve_handle(target).await?
+            }
+        };
+        if let Some(card) = card {
             let handle = PeerHandle::new(&card.handle)?;
-            let ep = match override_ep {
-                Some(ep) => ep,
-                None => endpoint_from_card(&card),
-            };
+            let ep = override_ep.unwrap_or_else(|| endpoint_from_card(&card));
             return Ok((card.peer_id, handle, ep));
         }
 

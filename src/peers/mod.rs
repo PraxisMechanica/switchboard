@@ -11,7 +11,10 @@ use crate::db::{Database, DbError};
 use crate::identity::{PeerId, Verified};
 use crate::primitives::Clock;
 
-pub use notify::{ApprovalNotifier, InboundKnockNotice, RecordingNotifier, TracingNotifier};
+pub use notify::{
+    ApprovalNotifier, ApprovalPromptOutcome, DesktopNotifier, InboundKnockNotice,
+    RecordingNotifier, TracingNotifier,
+};
 pub use repo::{migrate, PeersRepo};
 pub use state::{
     apply, ApprovedPeer, Knock, KnockDecision, Peer, PeerCommand, PeerEffect, PeerHandle,
@@ -128,6 +131,17 @@ impl<C: Clock, N: ApprovalNotifier> PeersService<C, N> {
         }
 
         Ok((updated, effects))
+    }
+
+    pub async fn prompt_inbound_approval(
+        &self,
+        peer_id: PeerId,
+        handle: &PeerHandle,
+        reason: &str,
+    ) -> ApprovalPromptOutcome {
+        self.notifier
+            .prompt_inbound_approval(peer_id, handle, reason)
+            .await
     }
 
     pub async fn approve_by_handle(

@@ -15,7 +15,7 @@ use switchboard::directory::{
 use switchboard::extensions::{AgyHarness, CodexHarness, MultiHarness};
 use switchboard::identity::{IdentityService, LocalKeypair, PeerId, Signed};
 use switchboard::ipc::{self, IpcRequest, IpcResponse};
-use switchboard::peers::TracingNotifier;
+use switchboard::peers::DesktopNotifier;
 use switchboard::primitives::{SystemClock, UuidV7Gen};
 use switchboard::transport::{
     InboundExchange, IrohTransport, NetworkMode, PeerDialer, PeerEndpoint, PeerListener,
@@ -28,7 +28,7 @@ type ProductionNode = SwitchboardNode<
     MultiHarness,
     SystemClock,
     UuidV7Gen,
-    TracingNotifier,
+    DesktopNotifier,
 >;
 
 pub async fn run_daemon(cfg: SwitchboardConfig, db: Database) -> Result<()> {
@@ -52,7 +52,7 @@ pub async fn run_daemon(cfg: SwitchboardConfig, db: Database) -> Result<()> {
         MultiHarness::new(CodexHarness::new(cfg.codex_config()), AgyHarness::default()),
         SystemClock,
         UuidV7Gen,
-        TracingNotifier,
+        DesktopNotifier,
     ));
 
     let cancel = CancellationToken::new();
@@ -74,6 +74,24 @@ pub async fn run_daemon(cfg: SwitchboardConfig, db: Database) -> Result<()> {
         .map(ToString::to_string)
         .collect();
     let peer_id_hex = local_ep.peer_id.to_hex();
+
+    if cfg.directory.git_remote.is_some() {
+        let sync_node = Arc::clone(&node);
+        let sync_addrs = direct_addrs.clone();
+        let sync_cancel = cancel.child_token();
+        tokio::spawn(async move {
+            let _ = sync_node.publish_directory_card(sync_addrs).await;
+            let _ = sync_node.directory.sync().await;
+            loop {
+                tokio::select! {
+                    _ = sync_cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(300)) => {
+                        let _ = sync_node.directory.sync().await;
+                    }
+                }
+            }
+        });
+    }
 
     loop {
         tokio::select! {

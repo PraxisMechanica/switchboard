@@ -180,6 +180,7 @@ fn two_real_daemons_complete_full_cli_lifecycle_including_revocation() {
     // 3. Launch two real `switchboard daemon` child processes.
     let _alice_daemon = DaemonGuard(
         Command::new(bin())
+            .env("SWITCHBOARD_HEADLESS", "1")
             .arg("--config")
             .arg(&alice_cfg)
             .arg("daemon")
@@ -190,6 +191,7 @@ fn two_real_daemons_complete_full_cli_lifecycle_including_revocation() {
     );
     let _bob_daemon = DaemonGuard(
         Command::new(bin())
+            .env("SWITCHBOARD_HEADLESS", "1")
             .arg("--config")
             .arg(&bob_cfg)
             .arg("daemon")

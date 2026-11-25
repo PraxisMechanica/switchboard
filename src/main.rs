@@ -363,7 +363,7 @@ async fn cmd_ipc_dial(cfg: &SwitchboardConfig, args: DialArgs) -> Result<()> {
         &IpcRequest::Knock {
             target: args.target,
             reason: args.reason,
-            timeout_secs: 30,
+            timeout_secs: 65,
         },
     )
     .await?;
