@@ -185,8 +185,8 @@ fn default_agy_brain_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| {
         PathBuf::from(h)
             .join(".gemini")
-            .join("antigravity")
-            .join("brain")
+            .join("antigravity-cli")
+            .join("conversations")
     })
 }
 
@@ -214,20 +214,22 @@ pub(crate) fn parse_agy_json_reply(stdout: &str) -> String {
     stdout.trim().to_string()
 }
 
-pub(crate) fn discover_agy_brain_sessions(brain_dir: &Path, limit: usize) -> Vec<CodexSessionInfo> {
-    let Ok(entries) = std::fs::read_dir(brain_dir) else {
+pub(crate) fn discover_agy_brain_sessions(
+    conversations_dir: &Path,
+    limit: usize,
+) -> Vec<CodexSessionInfo> {
+    let Ok(entries) = std::fs::read_dir(conversations_dir) else {
         return Vec::new();
     };
     let mut sessions = Vec::new();
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+        let Some(raw_name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
             continue;
         };
-        if Uuid::parse_str(&name).is_err() {
+        let Some(stem) = raw_name.strip_suffix(".db") else {
+            continue;
+        };
+        if Uuid::parse_str(stem).is_err() {
             continue;
         }
         let updated_at = entry
@@ -237,10 +239,10 @@ pub(crate) fn discover_agy_brain_sessions(brain_dir: &Path, limit: usize) -> Vec
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
         sessions.push(CodexSessionInfo {
-            id: name,
+            id: stem.to_string(),
             harness: HarnessKind::Agy,
             cwd: String::new(),
-            title: "Antigravity conversation".to_string(),
+            title: "Antigravity CLI conversation".to_string(),
             updated_at,
         });
     }
